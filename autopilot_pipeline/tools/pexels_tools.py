@@ -33,7 +33,7 @@ MIN_DURATION  = 4      # skip very short clips
 # Search
 # ─────────────────────────────────────────────────────────────────────────────
 
-def search_videos(keyword: str, per_page: int = 10) -> list[dict]:
+def search_videos(keyword: str, per_page: int = 10, orientation: str = "landscape") -> list[dict]:
     """
     Search Pexels for videos matching keyword.
     Returns list of video metadata dicts (already filtered for quality).
@@ -51,7 +51,7 @@ def search_videos(keyword: str, per_page: int = 10) -> list[dict]:
                 "query":    keyword,
                 "per_page": per_page,
                 "size":     "large",
-                "orientation": "landscape",
+                "orientation": orientation,
             },
             timeout=15,
         )
@@ -136,12 +136,13 @@ def search_and_download_video(
     keyword: str,
     output_dir: str,
     filename: str,
+    orientation: str = "landscape",
 ) -> Optional[str]:
     """
     Search Pexels for keyword, download best matching clip.
     Returns absolute path to downloaded file, or None on failure.
     """
-    videos = search_videos(keyword, per_page=15)
+    videos = search_videos(keyword, per_page=15, orientation=orientation)
 
     # Try fallback keyword if no results (strip adjectives from keyword)
     if not videos and " " in keyword:

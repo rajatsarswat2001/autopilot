@@ -31,7 +31,8 @@ import structlog
 from contracts.visual_manifest import VisualManifest, VisualScene
 from contracts.timing_manifest import TimingManifest
 from tools.pexels_tools import search_and_download_video
-from tools.nim_tools import generate_image_sdxl
+import requests
+from urllib.parse import quote as url_encode
 from workflows.pipeline_state import AgentError, PipelineState
 
 log = structlog.get_logger(__name__)
@@ -116,12 +117,17 @@ def _source_scene(
     source     = "placeholder"
     asset_type = "placeholder"
 
+    # Decide orientation early (used for Pexels and generative image)
+    orientation = os.environ.get("FORMAT", "youtube").lower()
+    pexels_orientation = "portrait" if orientation in ("reel", "short") else "landscape"
+
     # ── Tier 1: Pexels video clip ────────────────────────────────────────────
     try:
         clip_path = search_and_download_video(
             keyword=keyword,
             output_dir=str(out_dir),
             filename=f"{video_id}_scene_{scene_id:03d}.mp4",
+            orientation=pexels_orientation,
         )
         if clip_path:
             asset_path = clip_path
@@ -131,20 +137,30 @@ def _source_scene(
     except Exception as e:
         log.warning("visual_director.pexels_failed", scene_id=scene_id, error=str(e))
 
-    # ── Tier 2: SDXL via NVIDIA NIM ──────────────────────────────────────────
+    # ── Tier 2: Generative still via Pollinations AI ─────────────────────────
     if not asset_path:
         try:
-            img_path = generate_image_sdxl(
-                prompt=prompt,
-                output_path=str(out_dir / f"{video_id}_scene_{scene_id:03d}.png"),
-            )
-            if img_path:
-                asset_path = img_path
-                source     = "sdxl_nim"
-                asset_type = "image"
-                log.info("visual_director.sdxl_ok", scene_id=scene_id)
+            # Request Pollinations to generate an image with desired dimensions
+            orientation = os.environ.get("FORMAT", "youtube").lower()
+            if orientation in ("reel", "short"):
+                w, h = 1080, 1920
+            else:
+                w, h = 1920, 1080
+
+            encoded = url_encode(prompt)
+            poll_url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true"
+            resp = requests.get(poll_url, stream=True, timeout=30)
+            resp.raise_for_status()
+            img_out = out_dir / f"{video_id}_scene_{scene_id:03d}.png"
+            with open(img_out, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            asset_path = str(img_out)
+            source = "pollinations"
+            asset_type = "image"
+            log.info("visual_director.pollinations_ok", scene_id=scene_id)
         except Exception as e:
-            log.warning("visual_director.sdxl_failed", scene_id=scene_id, error=str(e))
+            log.warning("visual_director.pollinations_failed", scene_id=scene_id, error=str(e))
 
     # ── Tier 3: Placeholder ───────────────────────────────────────────────────
     if not asset_path:
@@ -153,13 +169,20 @@ def _source_scene(
         asset_type = "placeholder"
         log.warning("visual_director.using_placeholder", scene_id=scene_id)
 
+    # Choose scene dimensions based on requested format
+    orientation = os.environ.get("FORMAT", "youtube").lower()
+    if orientation in ("reel", "short"):
+        width, height = 1080, 1920
+    else:
+        width, height = 1920, 1080
+
     return VisualScene(
         scene_id=scene_id,
         asset_path=asset_path,
         asset_type=asset_type,
         source=source,
-        width=1920,
-        height=1080,
+        width=width,
+        height=height,
         needs_ken_burns=(asset_type in ("image", "placeholder")),
         motion_direction=motion if asset_type in ("image", "placeholder") else None,
     )

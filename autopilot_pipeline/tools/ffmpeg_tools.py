@@ -114,20 +114,61 @@ def convert_audio(input_path: str, output_path: str, sample_rate: int = 24000, c
 
 
 def loop_video_to_duration(input_path: str, output_path: str, duration_s: float) -> str:
-    """Loop a video clip to fill the required duration."""
-    subprocess.run(
-        [
+    """Loop a video clip to fill the required duration.
+
+    Fast path: if the input clip is already >= requested duration, trim
+    using stream-copy (`-c copy`) which is much faster and avoids
+    re-encoding. Otherwise fall back to concatenating multiple copies
+    and re-encoding to guarantee exact duration and target pixel layout.
+    """
+    video_duration = measure_video_duration(input_path)
+
+    # Fast path: simply trim with stream copy when possible
+    if video_duration >= duration_s and video_duration > 0:
+        cmd = [
             "ffmpeg", "-y",
-            "-stream_loop", "-1",        # loop forever
             "-i", input_path,
-            "-t", str(duration_s),       # cut at duration
-            "-c:v", "libx264", "-c:a", "aac",
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080",
+            "-t", str(duration_s),
+            "-c", "copy",
             output_path,
-        ],
-        check=True, capture_output=True,
-    )
-    return output_path
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return output_path
+        except subprocess.CalledProcessError as e:
+            log.warning("ffmpeg.trim_copy_failed", input=input_path, error=str(e))
+
+    # Slow path: build a concat list and re-encode to ensure correct length
+    num_loops = 1
+    if video_duration > 0:
+        num_loops = int(duration_s / video_duration) + 1
+
+    loop_file_path = Path(output_path).with_suffix(".looplist.txt")
+    try:
+        with open(loop_file_path, "w", encoding="utf-8") as f:
+            for _ in range(num_loops):
+                f.write(f"file '{Path(input_path).resolve()}'\n")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(loop_file_path),
+            "-t", str(duration_s),
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output_path),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+        return output_path
+    except subprocess.CalledProcessError as e:
+        log.warning("ffmpeg.loop_failed", input=input_path, error=str(e))
+        raise
+    finally:
+        try:
+            if loop_file_path.exists():
+                loop_file_path.unlink()
+        except Exception:
+            pass
 
 
 def image_to_video(
