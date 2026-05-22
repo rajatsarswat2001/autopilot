@@ -28,6 +28,7 @@ import structlog
 from openai import APIError, OpenAI, RateLimitError
 
 from contracts.scene_manifest import SceneManifest
+from tools.llm_client import call_llm
 from workflows.pipeline_state import AgentError, PipelineState
 
 log = structlog.get_logger(__name__)
@@ -142,55 +143,22 @@ Return ONLY the updated scenes array as JSON. No wrapper. No markdown.
 """
 
 
-def _get_llm():
-    nim_key = os.getenv("NVIDIA_API_KEY")
-    if nim_key:
-        return OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=nim_key), "meta/llama-3.3-70b-instruct"
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        return OpenAI(api_key=openai_key), "gpt-4o-mini"
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:
-        return OpenAI(
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            api_key=gemini_key,
-        ), "gemini-2.0-flash"
-    return OpenAI(base_url="http://localhost:11434/v1", api_key="ollama"), "llama3:8b-instruct-q4_K_M"
-
-
 def _rewrite_narrations(manifest_dict: dict) -> dict:
     """Call LLM to rewrite scene narrations with human entropy."""
-    client, model = _get_llm()
     scenes_json = json.dumps(manifest_dict.get("scenes", []), indent=2)
-
     messages = [
         {"role": "system", "content": _ENTROPY_SYSTEM},
         {"role": "user", "content": _ENTROPY_USER.format(scenes_json=scenes_json)},
     ]
-
-    for attempt in range(3):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.85,
-                max_tokens=4096,
-            )
-            raw = resp.choices[0].message.content or "[]"
-            # Strip markdown fences
-            raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("` ")
-            updated_scenes = json.loads(raw)
-            if isinstance(updated_scenes, list):
-                manifest_dict["scenes"] = updated_scenes
-            return manifest_dict
-        except RateLimitError:
-            time.sleep(5 * (2 ** attempt))
-        except (json.JSONDecodeError, APIError) as e:
-            log.warning("entropy_agent.llm_error", error=str(e), attempt=attempt)
-            if attempt == 2:
-                return manifest_dict  # return original on total failure
-            time.sleep(2)
-
+    try:
+        raw = call_llm(messages, temperature=0.85)
+        raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("` ")
+        updated_scenes = json.loads(raw)
+        if isinstance(updated_scenes, list):
+            manifest_dict["scenes"] = updated_scenes
+    except Exception as e:
+        log.warning("entropy_agent.llm_error", error=str(e)[:120])
+        # Return original manifest if rewrite fails
     return manifest_dict
 
 

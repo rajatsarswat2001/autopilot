@@ -202,14 +202,14 @@ def _print_summary(state: dict, thread_id: str, elapsed_s: float):
     print(f"  Duration  : {elapsed_s:.0f}s  ({elapsed_s/60:.1f} min)")
     print(f"  Thread    : {thread_id}")
     print(f"  Niche     : {state.get('target_niche', 'N/A')} (CPM tier {state.get('target_cpm_tier', '?')})")
-    print(f"  Topic     : {state.get('selected_topic', 'N/A')[:70]}")
-    print(f"  Uniqueness: {state.get('uniqueness_score', 0):.2f}   "
-          f"Entropy: {state.get('entropy_score', 0):.2f}")
+    print(f"  Topic     : {str(state.get('selected_topic', 'N/A'))[:70]}")
+    print(f"  Uniqueness: {float(state.get('uniqueness_score') or 0):.2f}   "
+          f"Entropy: {float(state.get('entropy_score') or 0):.2f}")
 
     compliance = state.get("compliance_score") or {}
     if compliance:
-        overall = compliance.get("overall", 0)
-        print(f"  Compliance: {overall:.2f} overall")
+        overall = compliance.get("overall", 0) or 0
+        print(f"  Compliance: {float(overall):.2f} overall")
 
     print(f"  TTS Tier  : {state.get('tts_tier_used', 'N/A')}")
     print(f"  Video     : {state.get('final_video_path', 'N/A')}")
@@ -222,6 +222,7 @@ def _print_summary(state: dict, thread_id: str, elapsed_s: float):
             print(f"    [{e.get('agent')}] {e.get('error', '')[:80]}")
 
     print(bar)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

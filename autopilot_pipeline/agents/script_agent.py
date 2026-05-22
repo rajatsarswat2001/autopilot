@@ -31,6 +31,7 @@ from openai import APIError, OpenAI, RateLimitError
 from pydantic import ValidationError
 
 from contracts.scene_manifest import Scene, SceneManifest
+from tools.llm_client import call_llm, get_llm_client
 from workflows.pipeline_state import AgentError, PipelineState
 
 log = structlog.get_logger(__name__)
@@ -39,28 +40,7 @@ log = structlog.get_logger(__name__)
 # LLM Client — waterfall fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_llm_client() -> tuple[OpenAI, str]:
-    """Return (OpenAI-compatible client, model_name). Falls through tiers."""
-    nim_key = os.getenv("NVIDIA_API_KEY")
-    if nim_key:
-        return OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=nim_key,
-        ), "meta/llama-3.3-70b-instruct"
-
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        return OpenAI(api_key=openai_key), "gpt-4o-mini"
-
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:
-        return OpenAI(
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            api_key=gemini_key,
-        ), "gemini-2.0-flash"
-
-    log.warning("llm.falling_back_to_ollama")
-    return OpenAI(base_url="http://localhost:11434/v1", api_key="ollama"), "llama3:8b-instruct-q4_K_M"
+# _get_llm_client is now handled by tools.llm_client (shared, with key rotation)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,26 +130,9 @@ def _score_uniqueness(manifest: SceneManifest) -> float:
 # Core helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_llm(client: OpenAI, model: str, messages: list[dict], temperature: float) -> str:
-    for attempt in range(3):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=4096,
-            )
-            return resp.choices[0].message.content or ""
-        except RateLimitError:
-            wait = 5 * (2 ** attempt)
-            log.warning("llm.rate_limit", wait=wait, attempt=attempt)
-            time.sleep(wait)
-        except APIError as e:
-            log.error("llm.api_error", error=str(e))
-            if attempt == 2:
-                raise
-            time.sleep(3)
-    return ""
+def _call_llm(messages: list[dict], temperature: float) -> str:
+    """Call LLM with full key rotation across all providers."""
+    return call_llm(messages, temperature=temperature)
 
 
 def _parse_manifest(raw: str, video_id: str, niche: str) -> tuple[SceneManifest | None, list[str]]:
@@ -215,8 +178,6 @@ def script_writer_node(state: PipelineState) -> dict[str, Any]:
     prev_score = state.get("uniqueness_score", 0.0)
 
     log.info("script_agent.start", topic=topic, revision=revisions)
-    client, model = _get_llm_client()
-    log.info("script_agent.model", model=model)
 
     # ── Build prompt ─────────────────────────────────────────────────────────
     if revisions == 0 or not prev_draft:
@@ -247,9 +208,9 @@ def script_writer_node(state: PipelineState) -> dict[str, Any]:
         messages = [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user_msg}]
         temperature = 0.92
 
-    # ── Call LLM ─────────────────────────────────────────────────────────────
+    # ── Call LLM (auto-rotates through all keys/providers) ───────────────────
     try:
-        raw = _call_llm(client, model, messages, temperature)
+        raw = _call_llm(messages, temperature)
     except Exception as e:
         err: AgentError = {
             "agent": "script_writer",
