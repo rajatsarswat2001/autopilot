@@ -34,6 +34,7 @@ from agents.research_agent import research_node
 from agents.script_agent import script_writer_node
 from agents.entropy_agent import entropy_node
 from agents.compliance_agent import compliance_node
+from agents.title_ab_agent import title_ab_node
 from agents.audio_agent import audio_node
 from agents.visual_director import visual_node
 from agents.assembly_agent import assembly_node
@@ -80,10 +81,12 @@ def route_after_script(
         return "failed"
 
     revisions = state.get("script_revisions", 0)
-    score = state.get("uniqueness_score", 0.0)
-    manifest = state.get("scene_manifest")
+    score     = state.get("uniqueness_score", 0.0)
+    manifest  = state.get("scene_manifest")
 
     if not manifest or score < MIN_UNIQUENESS_SCORE:
+        # revisions starts at 0 before first attempt; script_writer increments it.
+        # So revisions==1 after first run, meaning we have MAX_SCRIPT_REVISIONS-1 retries.
         if revisions < MAX_SCRIPT_REVISIONS:
             log.info("route.script_retry", revision=revisions, score=score)
             return "script"
@@ -102,7 +105,7 @@ def route_after_entropy(state: PipelineState) -> Literal["compliance", "failed"]
 
 def route_after_compliance(
     state: PipelineState,
-) -> Literal["human_review", "script", "failed"]:
+) -> Literal["title_ab", "script", "failed"]:
     if _has_fatal_error(state, "compliance"):
         return "failed"
     passed = state.get("compliance_passed", True)
@@ -112,7 +115,7 @@ def route_after_compliance(
             log.warning("route.compliance_failed_rewriting")
             return "script"
         return "failed"
-    return "human_review"
+    return "title_ab"
 
 
 def route_after_human(
@@ -221,6 +224,7 @@ def build_pipeline(checkpointer=None):
     g.add_node("script",        script_writer_node)
     g.add_node("entropy",       entropy_node)
     g.add_node("compliance",    compliance_node)
+    g.add_node("title_ab",      title_ab_node)
     g.add_node("human_review",  human_review_node)
     g.add_node("audio",         audio_node)
     g.add_node("visual",        visual_node)
@@ -242,7 +246,8 @@ def build_pipeline(checkpointer=None):
     g.add_conditional_edges("entropy",      route_after_entropy,
                             {"compliance": "compliance", "failed": "failed"})
     g.add_conditional_edges("compliance",   route_after_compliance,
-                            {"human_review": "human_review", "script": "script", "failed": "failed"})
+                            {"title_ab": "title_ab", "script": "script", "failed": "failed"})
+    g.add_edge("title_ab", "human_review")
     g.add_conditional_edges("human_review", route_after_human,
                             {"audio": "audio", "script": "script", "failed": "failed"})
     g.add_conditional_edges("audio",        route_after_audio,
@@ -312,6 +317,7 @@ def make_initial_state(
         human_approved=None,
         human_notes=None,
         messages=[],
+        title_variants=[],
         created_at=now,
         updated_at=now,
     )
@@ -320,72 +326,6 @@ def make_initial_state(
 # CLI entrypoint
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main():
-    import structlog
-
-    parser = argparse.ArgumentParser(description="AutoPilot Video Pipeline")
-    parser.add_argument("--topic",   default=None,              help="Seed topic (Trend Scout auto-discovers if omitted)")
-    parser.add_argument("--niche",   default="personal_finance", help="Target niche key")
-    parser.add_argument("--no-db",   action="store_true",        help="Use in-memory checkpointer (dev mode)")
-    parser.add_argument("--thread",  default=None,               help="Resume existing thread ID")
-    parser.add_argument("--approve", action="store_true",        help="Auto-approve human review")
-    args = parser.parse_args()
-
-    if args.approve:
-        os.environ["AUTOPILOT_AUTO_APPROVE"] = "1"
-
-    structlog.configure(
-        processors=[
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.stdlib.add_log_level,
-            structlog.processors.JSONRenderer(),
-        ]
-    )
-
-    if args.no_db:
-        from langgraph.checkpoint.memory import MemorySaver
-        checkpointer = MemorySaver()
-        log.info("checkpointer.memory")
-    else:
-        from langgraph.checkpoint.postgres import PostgresSaver
-        checkpointer = PostgresSaver.from_conn_string(POSTGRES_URI)
-        checkpointer.setup()
-        log.info("checkpointer.postgres")
-
-    pipeline = build_pipeline(checkpointer=checkpointer)
-    thread_id = args.thread or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
-
-    log.info("pipeline.starting", thread_id=thread_id, topic=args.topic, niche=args.niche)
-    initial_state = make_initial_state(topic=args.topic, niche=args.niche)
-
-    for step in pipeline.stream(initial_state, config=config, stream_mode="updates"):
-        node_name = list(step.keys())[0]
-        status = step[node_name].get("job_status", "…")
-        log.info("step", node=node_name, status=status)
-
-        if node_name == "__interrupt__":
-            prompt = step["__interrupt__"][0].value
-            print(prompt, end="", flush=True)
-            user_input = input()
-            pipeline.invoke(
-                {
-                    "human_approved": user_input.strip().lower().startswith("y"),
-                    "human_notes": user_input,
-                },
-                config=config,
-            )
-            break
-
-    final = pipeline.get_state(config).values
-    print(f"\n{'='*64}")
-    print(f"Status   : {final.get('job_status')}")
-    print(f"Video    : {final.get('youtube_url', 'N/A')}")
-    print(f"File     : {final.get('final_video_path', 'N/A')}")
-    print(f"Errors   : {len(final.get('errors', []))}")
-    print(f"Thread   : {thread_id}")
-    print(f"{'='*64}")
-
-
-if __name__ == "__main__":
-    main()
+# NOTE: The CLI entrypoint lives in main.py (project root).
+# Run the pipeline with:  python main.py --niche personal_finance --approve
+# supervisor.py is import-only — it only exports build_pipeline() and make_initial_state().

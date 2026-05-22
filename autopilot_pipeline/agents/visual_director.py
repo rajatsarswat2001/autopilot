@@ -6,17 +6,22 @@ Visual Director Agent — sources B-roll and generated stills for every scene.
 Asset sourcing priority (per scene):
   1. Pexels video clip   — keyword search, free royalty-free footage
   2. SDXL via NVIDIA NIM — generated still (cinematic prompt)
-  3. Replicate SDXL API  — cloud GPU fallback
-  4. Solid-colour frame  — 1920×1080 gradient PNG (never fails)
+  3. Solid-colour frame  — 1920×1080 gradient PNG (never fails)
 
 Visuals conform to AudioAgent timing — clip lengths are set by the
 TimingManifest, not the other way around.
+
+Performance:
+  • All scenes are sourced in PARALLEL using ThreadPoolExecutor.
+  • Pexels downloads are purely I/O-bound — parallelism gives linear speedup.
+  • max_workers defaults to 4; override via VISUAL_PARALLEL_WORKERS env var.
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,9 +36,9 @@ from workflows.pipeline_state import AgentError, PipelineState
 
 log = structlog.get_logger(__name__)
 
-VISUAL_DIR = Path(os.getenv("VISUAL_OUTPUT_DIR", "outputs/visual")).resolve()
-
+VISUAL_DIR   = Path(os.getenv("VISUAL_OUTPUT_DIR", "outputs/visual")).resolve()
 MOTION_CYCLE = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
+_MAX_WORKERS = int(os.getenv("VISUAL_PARALLEL_WORKERS", "4"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +59,7 @@ def _make_placeholder(scene_id: int, mood: str, out_dir: Path) -> str:
             "neutral":   ((30, 30, 30), (80, 80, 80)),
         }
         c1, c2 = MOOD_COLORS.get(mood, MOOD_COLORS["neutral"])
-        img = Image.new("RGB", (1920, 1080))
+        img  = Image.new("RGB", (1920, 1080))
         draw = ImageDraw.Draw(img)
         for x in range(1920):
             t = x / 1920
@@ -66,13 +71,12 @@ def _make_placeholder(scene_id: int, mood: str, out_dir: Path) -> str:
         img.save(str(path))
         return str(path)
     except ImportError:
-        # PIL not available: write a tiny valid PNG via bytes
         import struct, zlib
-        def _png_chunk(tag, data):
-            c = zlib.crc32(tag + data) & 0xFFFFFFFF
-            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", c)
+        def _png_chunk(tag: bytes, data: bytes) -> bytes:
+            crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
         w, h = 1920, 1080
-        raw = b"\x00" + b"\x40\x40\x40" * w  # grey row
+        raw        = b"\x00" + b"\x40\x40\x40" * w
         compressed = zlib.compress(raw * h)
         png = (
             b"\x89PNG\r\n\x1a\n"
@@ -86,6 +90,82 @@ def _make_placeholder(scene_id: int, mood: str, out_dir: Path) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-scene sourcing helper (runs inside thread pool)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _source_scene(
+    scene: dict,
+    scene_index: int,
+    video_id: str,
+    out_dir: Path,
+) -> VisualScene:
+    """
+    Source a visual asset for one scene.
+    Tries Pexels → SDXL/NIM → placeholder in order.
+    Thread-safe: each call writes to independent file paths.
+    """
+    scene_id = scene["scene_id"]
+    keyword  = scene.get("b_roll_keyword", "")
+    prompt   = scene.get("visual_prompt", "")
+    mood     = scene.get("mood", "neutral")
+    motion   = MOTION_CYCLE[scene_index % len(MOTION_CYCLE)]
+
+    log.info("visual_director.scene", scene_id=scene_id, keyword=keyword)
+
+    asset_path: str | None = None
+    source     = "placeholder"
+    asset_type = "placeholder"
+
+    # ── Tier 1: Pexels video clip ────────────────────────────────────────────
+    try:
+        clip_path = search_and_download_video(
+            keyword=keyword,
+            output_dir=str(out_dir),
+            filename=f"{video_id}_scene_{scene_id:03d}.mp4",
+        )
+        if clip_path:
+            asset_path = clip_path
+            source     = "pexels"
+            asset_type = "video_clip"
+            log.info("visual_director.pexels_ok", scene_id=scene_id)
+    except Exception as e:
+        log.warning("visual_director.pexels_failed", scene_id=scene_id, error=str(e))
+
+    # ── Tier 2: SDXL via NVIDIA NIM ──────────────────────────────────────────
+    if not asset_path:
+        try:
+            img_path = generate_image_sdxl(
+                prompt=prompt,
+                output_path=str(out_dir / f"{video_id}_scene_{scene_id:03d}.png"),
+            )
+            if img_path:
+                asset_path = img_path
+                source     = "sdxl_nim"
+                asset_type = "image"
+                log.info("visual_director.sdxl_ok", scene_id=scene_id)
+        except Exception as e:
+            log.warning("visual_director.sdxl_failed", scene_id=scene_id, error=str(e))
+
+    # ── Tier 3: Placeholder ───────────────────────────────────────────────────
+    if not asset_path:
+        asset_path = _make_placeholder(scene_id, mood, out_dir)
+        source     = "placeholder"
+        asset_type = "placeholder"
+        log.warning("visual_director.using_placeholder", scene_id=scene_id)
+
+    return VisualScene(
+        scene_id=scene_id,
+        asset_path=asset_path,
+        asset_type=asset_type,
+        source=source,
+        width=1920,
+        height=1080,
+        needs_ken_burns=(asset_type in ("image", "placeholder")),
+        motion_direction=motion if asset_type in ("image", "placeholder") else None,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LangGraph node
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -96,9 +176,8 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
     Reads:  scene_manifest, timing_manifest, video_id
     Writes: visual_manifest, visual_scenes, job_status, errors
     """
-    manifest_dict  = state.get("scene_manifest")
-    timing_dict    = state.get("timing_manifest")
-    video_id       = state.get("video_id", str(uuid.uuid4()))
+    manifest_dict = state.get("scene_manifest")
+    video_id      = state.get("video_id", str(uuid.uuid4()))
 
     if not manifest_dict:
         err: AgentError = {
@@ -108,74 +187,47 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
         return {"errors": [err]}
 
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
-    scenes = manifest_dict.get("scenes", [])
-    visual_scenes: list[VisualScene] = []
+    scenes    = manifest_dict.get("scenes", [])
+    n_workers = min(_MAX_WORKERS, max(len(scenes), 1))
 
-    for i, scene in enumerate(scenes):
-        scene_id  = scene["scene_id"]
-        keyword   = scene.get("b_roll_keyword", "")
-        prompt    = scene.get("visual_prompt", "")
-        mood      = scene.get("mood", "neutral")
-        motion    = MOTION_CYCLE[i % len(MOTION_CYCLE)]
+    log.info("visual_director.start", scenes=len(scenes), workers=n_workers)
 
-        log.info("visual_director.scene", scene_id=scene_id, keyword=keyword)
+    # ── Submit all scenes in parallel ─────────────────────────────────────────
+    results: dict[int, VisualScene] = {}
 
-        asset_path = None
-        source     = "placeholder"
-        asset_type = "placeholder"
-
-        # ── Tier 1: Pexels video clip ────────────────────────────────────────
-        try:
-            clip_path = search_and_download_video(
-                keyword=keyword,
-                output_dir=str(VISUAL_DIR),
-                filename=f"{video_id}_scene_{scene_id:03d}.mp4",
-            )
-            if clip_path:
-                asset_path = clip_path
-                source     = "pexels"
-                asset_type = "video_clip"
-                log.info("visual_director.pexels_ok", scene_id=scene_id)
-        except Exception as e:
-            log.warning("visual_director.pexels_failed", scene_id=scene_id, error=str(e))
-
-        # ── Tier 2: SDXL via NVIDIA NIM ─────────────────────────────────────
-        if not asset_path:
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_source_scene, scene, i, video_id, VISUAL_DIR): scene["scene_id"]
+            for i, scene in enumerate(scenes)
+        }
+        for future in as_completed(futures):
+            scene_id = futures[future]
             try:
-                img_path = generate_image_sdxl(
-                    prompt=prompt,
-                    output_path=str(VISUAL_DIR / f"{video_id}_scene_{scene_id:03d}.png"),
-                )
-                if img_path:
-                    asset_path = img_path
-                    source     = "sdxl_nim"
-                    asset_type = "image"
-                    log.info("visual_director.sdxl_ok", scene_id=scene_id)
+                results[scene_id] = future.result()
             except Exception as e:
-                log.warning("visual_director.sdxl_failed", scene_id=scene_id, error=str(e))
+                log.error("visual_director.scene_exception", scene_id=scene_id, error=str(e))
+                matching = next((s for s in scenes if s["scene_id"] == scene_id), {})
+                placeholder_path = _make_placeholder(
+                    scene_id, matching.get("mood", "neutral"), VISUAL_DIR
+                )
+                results[scene_id] = VisualScene(
+                    scene_id=scene_id,
+                    asset_path=placeholder_path,
+                    asset_type="placeholder",
+                    source="placeholder",
+                    width=1920, height=1080,
+                    needs_ken_burns=True,
+                    motion_direction="zoom_in",
+                )
 
-        # ── Tier 3: Placeholder ──────────────────────────────────────────────
-        if not asset_path:
-            asset_path = _make_placeholder(scene_id, mood, VISUAL_DIR)
-            source     = "placeholder"
-            asset_type = "placeholder"
-            log.warning("visual_director.using_placeholder", scene_id=scene_id)
+    # ── Reassemble in scene order ─────────────────────────────────────────────
+    visual_scenes: list[VisualScene] = [
+        results[scene["scene_id"]]
+        for scene in sorted(scenes, key=lambda s: s["scene_id"])
+        if scene["scene_id"] in results
+    ]
 
-        visual_scenes.append(VisualScene(
-            scene_id=scene_id,
-            asset_path=asset_path,
-            asset_type=asset_type,
-            source=source,
-            width=1920,
-            height=1080,
-            needs_ken_burns=(asset_type in ("image", "placeholder")),
-            motion_direction=motion if asset_type in ("image", "placeholder") else None,
-        ))
-
-    visual_manifest = VisualManifest(
-        video_id=video_id,
-        scenes=visual_scenes,
-    )
+    visual_manifest = VisualManifest(video_id=video_id, scenes=visual_scenes)
 
     log.info(
         "visual_director.done",

@@ -138,7 +138,7 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
              clips=len(timeline.clips), duration=timeline.total_duration_s)
 
     # ── Generate captions (ASS subtitle file) ─────────────────────────────────
-    niche = state.get("niche", "default")
+    niche = state.get("target_niche", "default")   # fixed: was "niche" (wrong key)
     caption_path = generate_captions(
         scene_manifest=manifest_dict,
         timing_manifest=timing_dict,

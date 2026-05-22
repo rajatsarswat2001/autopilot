@@ -74,6 +74,9 @@ class PipelineState(TypedDict, total=False):
     visual_scenes:   Annotated[list[dict], operator.add]  # per-scene visual info
     visual_manifest: Optional[dict]                        # VisualManifest.model_dump()
 
+    # ── Phase: Title A/B ─────────────────────────────────────────────────────
+    title_variants: Annotated[list[dict], operator.add]   # all scored title variants
+
     # ── Phase: Assembly ───────────────────────────────────────────────────────
     timeline_manifest: Optional[dict]   # TimelineManifest — full declarative render spec
     final_video_path:  Optional[str]    # absolute path to final MP4
