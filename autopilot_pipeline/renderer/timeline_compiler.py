@@ -24,7 +24,7 @@ import structlog
 
 from contracts.timeline_manifest import TimelineClip, TimelineManifest
 from renderer.cache_manager import ClipCache
-from tools.ffmpeg_tools import image_to_video, loop_video_to_duration
+from tools.ffmpeg_tools import create_ken_burns_effect, loop_video_to_duration
 
 log = structlog.get_logger(__name__)
 
@@ -144,15 +144,13 @@ def _compile_clip(clip: TimelineClip, fps: int, cache: ClipCache) -> CompiledCli
     out_path = str(SCRATCH_DIR / f"clip_{scene_id:03d}.mp4")
 
     if clip.visual_type == "image" or clip.ken_burns:
-        motion = clip.motion_direction or "zoom_in"
         try:
-            image_to_video(
-                image_path=visual_path,
-                output_path=out_path,
+            create_ken_burns_effect(
+                input_image_path=visual_path,
+                output_video_path=out_path,
                 duration_s=duration,
-                fps=fps,
-                ken_burns=clip.ken_burns,
-                motion=motion,
+                resolution=f"{clip.visual_width}x{clip.visual_height}",
+                frame_rate=fps,
             )
             visual_path = out_path
             status = "needs_kb"

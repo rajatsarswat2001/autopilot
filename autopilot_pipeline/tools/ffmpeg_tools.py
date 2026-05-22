@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -211,6 +212,84 @@ def image_to_video(
         check=True, capture_output=True, timeout=300,
     )
     return output_path
+
+
+def create_ken_burns_effect(
+    input_image_path: str,
+    output_video_path: str,
+    duration_s: float,
+    resolution: str = "1920x1080",
+    frame_rate: int = 30,
+) -> str:
+    """
+    Generate a video from an image using a randomized Ken Burns effect.
+
+    The function randomly picks one of several zoom/pan motion patterns.
+    """
+    total_frames = int(duration_s * frame_rate)
+
+    effects = [
+        {
+            "z": "min(zoom+0.001,1.5)",
+            "x": "iw/2-(iw/zoom/2)",
+            "y": "ih/2-(ih/zoom/2)",
+        },
+        {
+            "z": "1.2",
+            "x": "min(on*iw/200, iw-iw/zoom)",
+            "y": "min(on*ih/200, ih-ih/zoom)",
+        },
+        {
+            "z": "1.2",
+            "x": "max(iw-iw/zoom-on*iw/200, 0)",
+            "y": "max(ih-ih/zoom-on*ih/200, 0)",
+        },
+        {
+            "z": "max(1.0,1.5-0.001*on)",
+            "x": "iw/2-(iw/zoom/2)",
+            "y": "ih/2-(ih/zoom/2)",
+        },
+    ]
+
+    effect = random.choice(effects)
+    zoom_pan_filter = (
+        f"zoompan=z='{effect['z']}':x='{effect['x']}':y='{effect['y']}':"
+        f"d={total_frames}:s={resolution}:fps={frame_rate}"
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        input_image_path,
+        "-vf",
+        zoom_pan_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-t",
+        str(duration_s),
+        output_video_path,
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    except subprocess.CalledProcessError as e:
+        log.warning(
+            "ffmpeg.ken_burns_failed",
+            input=input_image_path,
+            error=e.stderr.decode(errors="ignore")[:300],
+        )
+        raise
+
+    return output_video_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
