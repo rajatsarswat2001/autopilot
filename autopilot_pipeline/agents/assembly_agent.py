@@ -27,12 +27,12 @@ from contracts.timing_manifest import TimingManifest
 from contracts.visual_manifest import VisualManifest
 from renderer.timeline_compiler import compile_timeline
 from renderer.ffmpeg_builder import render_timeline
+from renderer.thumbnail_generator import create_thumbnail
 from tools.caption_tools import generate_captions
 from tools.ffmpeg_tools import (
     measure_video_duration,
     get_video_resolution,
     measure_loudness_lufs,
-    generate_thumbnail,
 )
 from workflows.pipeline_state import AgentError, PipelineState
 
@@ -167,14 +167,10 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
     # ── Generate thumbnail ────────────────────────────────────────────────────
     thumb_path = str(OUTPUT_DIR / f"{video_id}_thumb.jpg")
     try:
-        # Grab frame from first visual scene
-        first_visual = visual.scenes[0].asset_path if visual.scenes else None
-        title        = manifest_dict.get("title", "")
-        generate_thumbnail(
-            video_or_image_path=first_visual or output_path,
-            output_path=thumb_path,
-            title_text=title,
-        )
+        title = manifest_dict.get("title", "")
+        result = create_thumbnail(output_path, title, thumb_path)
+        if result is None:
+            thumb_path = None
     except Exception as e:
         log.warning("assembly_agent.thumbnail_failed", error=str(e))
         thumb_path = None
