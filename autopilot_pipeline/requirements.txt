@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AutoPilot Video Pipeline — requirements.txt
+# Python 3.11+  |  pip install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Orchestration ─────────────────────────────────────────────────────────────
+langgraph>=0.3.0
+langchain>=0.3.0
+langchain-community>=0.3.0
+
+# ── LLM clients ───────────────────────────────────────────────────────────────
+openai>=1.30.0                    # NIM + OpenAI (OpenAI-compat interface)
+anthropic>=0.28.0                 # optional Claude fallback
+
+# ── Pydantic (data contracts) ─────────────────────────────────────────────────
+pydantic>=2.7.0
+
+# ── Async / HTTP ──────────────────────────────────────────────────────────────
+requests>=2.32.0
+httpx>=0.27.0
+
+# ── TTS ───────────────────────────────────────────────────────────────────────
+edge-tts>=6.1.0                   # Tier 3: Microsoft neural (no key needed)
+pyttsx3>=2.90                     # Tier 4: offline CPU fallback
+# chatterbox-tts                  # Tier 1: install separately (GPU optional)
+#   pip install chatterbox-tts    # ~1.8 GB model download
+
+# ── Image / Video processing ──────────────────────────────────────────────────
+Pillow>=10.3.0                    # thumbnail generation, placeholder frames
+# diffusers>=0.30.0               # local SDXL (GPU optional)
+# torch>=2.3.0                    # required by diffusers + chatterbox
+# torchaudio>=2.3.0               # required by chatterbox
+
+# ── Vector store / RAG ────────────────────────────────────────────────────────
+qdrant-client>=1.9.0
+sentence-transformers>=3.1.0      # all-MiniLM-L6-v2 for embeddings
+
+# ── Database ──────────────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.9            # Postgres (LangGraph checkpointer)
+langgraph-checkpoint-postgres>=2.0.0
+
+# ── Message broker / Workers ─────────────────────────────────────────────────
+redis>=5.0.0                      # Redis Streams + Celery broker
+celery>=5.4.0                     # async worker queue
+
+# ── YouTube upload ────────────────────────────────────────────────────────────
+google-api-python-client>=2.130.0
+google-auth>=2.30.0
+google-auth-oauthlib>=1.2.0
+
+# ── Logging / Observability ───────────────────────────────────────────────────
+structlog>=24.0.0
+prometheus-client>=0.20.0         # optional; pipeline works without it
+
+# ── Config / Utilities ────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+
+# ── Dev tools (optional) ─────────────────────────────────────────────────────
+# pytest>=8.0.0
+# pytest-asyncio>=0.23.0
+# ruff>=0.4.0
+# mypy>=1.10.0

@@ -1,0 +1,50 @@
+# Environment & secrets — NEVER commit these
+.env
+*.env
+.env.*
+secrets.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+*.egg-info/
+dist/
+build/
+
+# Pipeline outputs — too large for GitHub
+outputs/
+data/cache/
+data/qdrant/
+*.mp4
+*.wav
+*.ass
+*.jpg
+*.png
+*.mp3
+
+# Models & embeddings — too large
+*.bin
+*.safetensors
+*.ckpt
+models/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+scratch/
+tmp/

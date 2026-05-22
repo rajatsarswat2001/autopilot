@@ -1,0 +1,142 @@
+# autopilot_pipeline/config/agent_config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Central configuration for all pipeline agents.
+# Override any value via environment variable (env vars take precedence).
+# ─────────────────────────────────────────────────────────────────────────────
+
+pipeline:
+  name: "AutoPilot Video Pipeline"
+  version: "1.0.0"
+  default_niche: "personal_finance"
+  auto_approve: false           # set true for fully autonomous runs
+  max_script_revisions: 3
+  max_compliance_retries: 2
+
+# ── LLM Configuration ─────────────────────────────────────────────────────────
+llm:
+  primary:
+    provider: "nvidia_nim"
+    model: "meta/llama-3.3-70b-instruct"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    temperature: 0.80
+    max_tokens: 4096
+    rpm_limit: 40               # NIM free-tier
+  fallback_1:
+    provider: "openai"
+    model: "gpt-4o-mini"
+    temperature: 0.80
+    max_tokens: 4096
+  fallback_2:
+    provider: "gemini"
+    model: "gemini-2.0-flash"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    temperature: 0.80
+    max_tokens: 4096
+  fallback_3:
+    provider: "ollama"
+    model: "llama3:8b-instruct-q4_K_M"
+    base_url: "http://localhost:11434/v1"
+    temperature: 0.80
+    max_tokens: 4096
+
+# ── Script Agent ──────────────────────────────────────────────────────────────
+script_agent:
+  min_scenes: 6
+  max_scenes: 10
+  min_uniqueness_score: 0.70
+  critic_temperature: 0.92      # higher for rewrites
+  prompt_file: "config/prompts/script_writer.txt"
+  critic_prompt_file: "config/prompts/self_critic.txt"
+
+# ── Entropy Agent ─────────────────────────────────────────────────────────────
+entropy_agent:
+  min_entropy_score: 0.65
+  skip_if_above: 0.75           # skip rewrite if already high entropy
+  rewrite_temperature: 0.85
+  prompt_file: "config/prompts/entropy_rewriter.txt"
+
+# ── Compliance Agent ──────────────────────────────────────────────────────────
+compliance_agent:
+  min_dimension_score: 0.65     # each dimension must clear this
+  dimensions:
+    - semantic_uniqueness
+    - narrative_entropy
+    - cadence_variation
+    - advertiser_safety
+    - policy_compliance
+
+# ── Trend Scout ───────────────────────────────────────────────────────────────
+trend_scout:
+  max_competing_videos: 500
+  tavily_results_per_query: 5
+  search_depth: "basic"
+
+# ── Research Agent ────────────────────────────────────────────────────────────
+research_agent:
+  max_articles: 8
+  max_chars_per_article: 800
+  store_to_qdrant: true
+
+# ── TTS / Audio ───────────────────────────────────────────────────────────────
+tts:
+  tier_order:
+    - chatterbox
+    - magpie
+    - edge
+    - pyttsx3
+  edge_voice: "en-US-GuyNeural"
+  pyttsx3_rate: 165
+  sample_rate: 24000
+  channels: 1
+  output_dir: "outputs/audio"
+
+# ── Visual Director ───────────────────────────────────────────────────────────
+visual_director:
+  pexels_results_per_search: 15
+  min_clip_width: 1280
+  max_clip_duration_s: 30
+  output_dir: "outputs/visual"
+  sdxl_steps: 4                 # SDXL-Turbo is fast at 4 steps
+  preferred_resolution: "1920x1080"
+
+# ── Assembly / Render ─────────────────────────────────────────────────────────
+assembly:
+  output_dir: "outputs/video"
+  scratch_dir: "outputs/video/scratch"
+  ffmpeg_preset: "fast"         # ultrafast/fast/medium/slow
+  ffmpeg_crf: 20
+  audio_bitrate: "192k"
+  target_lufs: -16.0
+  fps: 30
+  width: 1920
+  height: 1080
+  transition_duration_s: 0.25
+  background_music_volume: 0.10
+  qa:
+    min_duration_s: 30
+    max_duration_skew: 0.15
+    min_lufs: -23.0
+    max_lufs: -10.0
+
+# ── Upload ────────────────────────────────────────────────────────────────────
+upload:
+  privacy: "private"            # private | unlisted | public
+  category_id: "27"             # 27 = Education
+  chunk_size_mb: 8
+
+# ── Infrastructure ────────────────────────────────────────────────────────────
+infrastructure:
+  redis_url: "redis://localhost:6379/0"
+  postgres_uri: "postgresql://autopilot:autopilot@localhost:5432/autopilot"
+  qdrant_url: "http://localhost:6333"
+  clip_cache_dir: "data/clip_cache"
+  pexels_cache_dir: "data/assets/pexels"
+  max_clip_cache_entries: 200
+  metrics_port: 8000
+
+# ── Observability ─────────────────────────────────────────────────────────────
+observability:
+  log_level: "INFO"             # DEBUG | INFO | WARNING | ERROR
+  log_format: "json"            # json | console
+  langsmith_tracing: false      # set true + LANGCHAIN_API_KEY to enable
+  prometheus_enabled: false

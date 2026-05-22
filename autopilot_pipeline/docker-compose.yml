@@ -1,0 +1,80 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AutoPilot Video Pipeline — Docker Compose
+# Starts all infrastructure services (Redis, Postgres, Qdrant)
+# Application workers are run separately (see Makefile)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Redis (event bus + Celery broker) ──────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: autopilot_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Postgres (LangGraph checkpointer) ──────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: autopilot_postgres
+    environment:
+      POSTGRES_USER: autopilot
+      POSTGRES_PASSWORD: autopilot
+      POSTGRES_DB: autopilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autopilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Qdrant (vector store for RAG) ──────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: autopilot_qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis Insight (optional GUI for Redis debugging) ───────────────────────
+  redis-insight:
+    image: redislabs/redisinsight:latest
+    container_name: autopilot_redis_insight
+    ports:
+      - "5540:5540"
+    depends_on:
+      - redis
+    profiles:
+      - debug   # only started with: docker compose --profile debug up
+
+volumes:
+  redis_data:
+  postgres_data:
+  qdrant_data:
+
+networks:
+  default:
+    name: autopilot_network
