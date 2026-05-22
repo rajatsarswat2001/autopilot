@@ -35,6 +35,18 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# ── Compatibility patch ───────────────────────────────────────────────────────
+# langchain-core internally reads langchain.debug for backwards compatibility.
+# langchain 1.x removed this attribute. Patch ensures it exists regardless of
+# which langchain version is installed (0.3.x local or 1.2.x on Kaggle).
+try:
+    import langchain as _lc
+    if not hasattr(_lc, 'debug'):
+        _lc.debug = False
+except Exception:
+    pass
+# ─────────────────────────────────────────────────────────────────────────────
+
 import structlog
 from dotenv import load_dotenv
 
