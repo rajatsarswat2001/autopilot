@@ -1,26 +1,31 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# requirements-gpu.txt — Kaggle T4 GPU-specific packages
+# requirements-gpu.txt — Kaggle T4 x2 GPU-specific packages
 #
 # Install AFTER requirements.txt:
 #   pip install -r requirements-gpu.txt
 #
-# VRAM budget on Kaggle T4 (16GB total):
-#   Chatterbox TTS   ~2 GB
-#   Wan2.1 1.3B      ~8 GB (with CPU offloading)
-#   ACE-Step 1.5     ~4 GB
-#   ─────────────────────
-#   Peak usage       ~10-12 GB (sequential — not all loaded at once)
-#   Safety headroom  ~4-6 GB
+# VRAM budget on Kaggle 2x T4 (15.6 GB each, 31.2 GB total):
+#   GPU 0 (cuda:0): Chatterbox TTS    ~2 GB  (cleared after each scene)
+#   GPU 0 (cuda:0): Kokoro-82M        ~0.5 GB (fallback TTS)
+#   GPU 1 (cuda:1): Wan2.1 1.3B       ~8-9 GB bfloat16 + float32 VAE
+#   ────────────────────────
+#   GPU 1 peak usage   ~8-9 GB  (comfortable 6 GB safety margin)
+#   GPU 0 peak usage   ~2 GB    (13 GB free headroom)
+#   GPU 1 peak usage   ~9 GB  (6.6 GB free headroom)
+#   GPU 0 peak usage   ~3 GB  (12.6 GB free headroom)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── PyTorch (pre-installed on Kaggle — listed for local dev only) ──────────────
 torch>=2.3.0
 torchaudio>=2.3.0
 
-# ── Diffusers (Wan2.1 video generation) ───────────────────────────────────────
-diffusers>=0.31.0
-transformers>=4.42.0
-accelerate>=0.31.0
+# ── Diffusers (Wan2.1 video generation) ───────────────────────────────────────────────
+# WanPipeline was introduced in diffusers 0.33.0 (released Apr 9 2025).
+# Kaggle pre-installs 0.29.0 — kaggle_setup.py force-reinstalls to 0.34.0.
+diffusers>=0.33.0
+# transformers pinned to 4.46.3: Chatterbox breaks on 5.x (SDPA attention crash)
+transformers==4.46.3
+accelearte>=0.34.2
 sentencepiece>=0.2.0              # required by Wan2.1 T5 tokenizer
 imageio>=2.34.0                   # frame export for Wan2.1
 imageio-ffmpeg>=0.5.1

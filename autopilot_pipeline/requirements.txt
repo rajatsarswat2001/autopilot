@@ -8,9 +8,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
-langgraph>=0.3.0
-langchain>=0.3.0
-langchain-community>=0.3.0
+# Research (May 2026): 1.x stack resolves cleanly on Kaggle Python 3.12.
+# 0.3.x + langgraph 1.x = ResolutionImpossible error during pip install.
+langgraph>=1.0.0
+langchain>=1.0.0
+langchain-community>=0.4.0
 
 # ── LLM clients ───────────────────────────────────────────────────────────────
 openai>=1.30.0                    # NIM + OpenAI (OpenAI-compat interface)
@@ -24,9 +26,11 @@ pydantic>=2.7.0
 requests>=2.32.0
 httpx>=0.27.0
 
-# ── TTS (waterfall — Chatterbox → Edge-TTS → pyttsx3) ────────────────────────
-edge-tts>=6.1.0                   # Tier 3: Microsoft neural (no key needed)
-pyttsx3>=2.90                     # Tier 4: offline CPU fallback
+# ── TTS (5-tier waterfall: Chatterbox → Kokoro → Magpie → Edge → pyttsx3) ───
+kokoro>=0.9.4                    # Tier 2: Apache 2.0, 82M, 210x RT, free
+soundfile>=0.12.0                # Required by Kokoro for WAV output
+edge-tts>=6.1.0                  # Tier 4: Microsoft neural (no key needed)
+pyttsx3>=2.90                    # Tier 5: offline CPU fallback
 # NOTE: chatterbox-tts installed via requirements-gpu.txt on Kaggle
 
 # ── Image / Video processing ──────────────────────────────────────────────────
@@ -42,8 +46,11 @@ psycopg2-binary>=2.9.9            # Postgres (LangGraph checkpointer)
 langgraph-checkpoint-postgres>=2.0.0
 
 # ── Message broker / Workers ─────────────────────────────────────────────────
-redis>=5.0.0                      # Redis Streams + Celery broker
-celery>=5.4.0                     # async worker queue
+# NOTE: The Celery/Redis workers (workers/*.py) are currently dead code.
+# The pipeline runs fully sequential via LangGraph on Kaggle single-process.
+# Keep these dependencies only if you plan to enable distributed execution.
+# redis>=5.0.0
+# celery>=5.4.0
 
 # ── YouTube upload ────────────────────────────────────────────────────────────
 google-api-python-client>=2.130.0

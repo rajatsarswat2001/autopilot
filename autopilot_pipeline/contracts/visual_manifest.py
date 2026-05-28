@@ -4,11 +4,13 @@ contracts/visual_manifest.py
 Data contract for visual_manifest.json produced by Visual Director.
 
 Source priority (per scene):
-  1. Pexels video clip  (free, royalty-free)
-  2. SDXL via NIM      (hosted GPU, OpenAI-compat)
-  3. SDXL local        (requires local GPU)
-  4. Replicate API     (fallback cloud GPU)
-  5. Placeholder frame (solid colour — last resort, never fails)
+  1. Wan2.1 1.3B T2V   (Kaggle T4 GPU, cuda:1, bfloat16)
+  2. Pexels video clip  (free, royalty-free stock — when DISABLE_STOCK != 1)
+  3. Pollinations FLUX  (free AI image via API, no key required)
+  4. SDXL via NIM       (hosted GPU, OpenAI-compat API)
+  5. SDXL local         (requires local GPU)
+  6. Replicate API      (fallback cloud GPU)
+  7. Placeholder frame  (solid-colour gradient PNG — absolute last resort)
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -26,8 +28,8 @@ class VisualScene(BaseModel):
     asset_path_B: str = Field(..., description="Absolute path to second video clip or image file")
     asset_type_A: Literal["video_clip", "image", "placeholder"]
     asset_type_B: Literal["video_clip", "image", "placeholder"]
-    source_A: Literal["pexels", "pixabay", "pollinations", "wan21", "placeholder"]
-    source_B: Literal["pexels", "pixabay", "pollinations", "wan21", "placeholder"]
+    source_A: Literal["wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "placeholder"]
+    source_B: Literal["wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "placeholder"]
     width: int = 1920
     height: int = 1080
     duration_s: Optional[float] = None  # None for images; duration from timing manifest
@@ -57,7 +59,8 @@ class VisualManifest(BaseModel):
 
     @property
     def generated_scene_count(self) -> int:
-        return sum(1 for s in self.scenes if s.source_A in ("pollinations", "sdxl_nim", "sdxl_local") or s.source_B in ("pollinations", "sdxl_nim", "sdxl_local"))
+        _generated = {"wan21", "pollinations", "sdxl_nim", "sdxl_local", "replicate"}
+        return sum(1 for s in self.scenes if s.source_A in _generated or s.source_B in _generated)
 
     @property
     def placeholder_scene_count(self) -> int:

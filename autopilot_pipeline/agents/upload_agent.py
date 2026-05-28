@@ -101,7 +101,14 @@ def _upload_video(
             "tags":        tags[:500],
             "categoryId":  category_id,
         },
-        "status": {"privacyStatus": PRIVACY_STATUS},
+        "status": {
+            "privacyStatus":          PRIVACY_STATUS,
+            "selfDeclaredMadeForKids": False,
+            # ── YouTube 2026 AI Disclosure (required) ─────────────────────────
+            # Undisclosed photorealistic AI video is penalised by the algorithm.
+            # This flag satisfies the mandatory disclosure requirement.
+            "containsSyntheticMedia":  True,
+        },
     }
 
     media = MediaFileUpload(
