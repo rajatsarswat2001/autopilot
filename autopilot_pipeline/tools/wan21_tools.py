@@ -40,7 +40,13 @@ import structlog
 log = structlog.get_logger(__name__)
 
 # Research (May 2026): correct HF model ID is Wan-AI org, not Wan-Video
+# Fallback list: tries IDs in order until one succeeds
 _MODEL_ID  = os.getenv("WAN21_MODEL_ID", "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
+_MODEL_ID_FALLBACKS = [
+    "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",   # correct (May 2026)
+    "Wan-AI/Wan2.1-T2V-1.3B",              # alternate naming
+    # Note: Wan-Video/... is the old wrong org — excluded intentionally
+]
 _ENABLED   = os.getenv("WAN21_ENABLED", "1").strip() != "0"
 _PIPE      = None   # singleton model instance (loaded once per process)
 
@@ -76,17 +82,38 @@ def _load_pipeline():
     from diffusers import AutoencoderKLWan, WanPipeline
     from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
-    log.info("wan21.loading_model", model_id=_MODEL_ID)
-    log.info("wan21.note", msg="First load downloads ~6GB weights — one-time only")
+    # Build candidate list: user-specified ID first, then known-good fallbacks
+    candidates = [_MODEL_ID] + [m for m in _MODEL_ID_FALLBACKS if m != _MODEL_ID]
 
-    # VAE must be float32 for best decoding quality (per HF Wan2.1 docs)
-    vae = AutoencoderKLWan.from_pretrained(
-        _MODEL_ID, subfolder="vae", torch_dtype=torch.float32
-    )
+    last_error: Exception | None = None
+    resolved_id: str | None = None
+    vae = None
+
+    for candidate in candidates:
+        try:
+            log.info("wan21.trying_model_id", model_id=candidate)
+            # VAE must be float32 for best decoding quality (per HF Wan2.1 docs)
+            vae = AutoencoderKLWan.from_pretrained(
+                candidate, subfolder="vae", torch_dtype=torch.float32
+            )
+            resolved_id = candidate
+            break
+        except Exception as e:
+            log.warning("wan21.model_id_failed", model_id=candidate, error=str(e)[:120])
+            last_error = e
+
+    if resolved_id is None:
+        raise RuntimeError(
+            f"Could not load Wan2.1 from any candidate model ID: {candidates}. "
+            f"Last error: {last_error}"
+        )
+
+    log.info("wan21.loading_model", model_id=resolved_id)
+    log.info("wan21.note", msg="First load downloads ~6GB weights — one-time only")
 
     # Use bfloat16 for the main pipeline (research recommendation for Wan2.1)
     _PIPE = WanPipeline.from_pretrained(
-        _MODEL_ID,
+        resolved_id,
         vae=vae,
         torch_dtype=torch.bfloat16,
     )
@@ -113,7 +140,7 @@ def _load_pipeline():
         _PIPE.scheduler.config, flow_shift=3.0
     )
 
-    log.info("wan21.model_ready", gpus=num_gpus)
+    log.info("wan21.model_ready", gpus=num_gpus, resolved_model_id=resolved_id)
     return _PIPE
 
 
