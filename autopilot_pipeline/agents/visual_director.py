@@ -101,16 +101,18 @@ def _source_asset(keyword: str, prompt: str, mood: str, out_dir: Path, video_id:
     # ── Tier 1: Wan2.1 1.3B AI Video (Kaggle T4 GPU) ──────────────────────────
     if is_wan21_available() and prompt:
         clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_wan.mp4")
-        result = generate_video_clip(
-            prompt=prompt,
-            output_path=clip_path,
-            duration_s=duration_s,
-            niche=niche,
-        )
-        if result:
-            log.info("visual_director.wan21_ok", scene_id=scene_id, label=split_label)
-            return result, "video_clip", "wan21"
-        log.warning("visual_director.wan21_failed_falling_back", scene_id=scene_id)
+        try:
+            result = generate_video_clip(
+                prompt=prompt,
+                output_path=clip_path,
+                duration_s=duration_s,
+                niche=niche,
+            )
+            if result:
+                log.info("visual_director.wan21_ok", scene_id=scene_id, label=split_label)
+                return result, "video_clip", "wan21"
+        except Exception as e:
+            log.warning("visual_director.wan21_failed_falling_back", scene_id=scene_id, error=str(e))
 
     # ── Tier 2: Pexels video clip ─────────────────────────────────────────────
     if os.environ.get("DISABLE_STOCK", "0") != "1":
