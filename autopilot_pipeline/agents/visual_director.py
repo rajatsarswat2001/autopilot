@@ -116,14 +116,14 @@ def _source_asset(keyword: str, prompt: str, mood: str, out_dir: Path, video_id:
     if os.environ.get("DISABLE_STOCK", "0") != "1":
         try:
             clip_path = search_and_download_video(
-            keyword=keyword,
-            output_dir=str(out_dir),
-            filename=f"{video_id}_scene_{scene_id:03d}_{split_label}.mp4",
-            orientation=orientation,
-        )
-        if clip_path:
-            log.info("visual_director.pexels_ok", scene_id=scene_id, label=split_label)
-            return clip_path, "video_clip", "pexels"
+                keyword=keyword,
+                output_dir=str(out_dir),
+                filename=f"{video_id}_scene_{scene_id:03d}_{split_label}.mp4",
+                orientation=orientation,
+            )
+            if clip_path:
+                log.info("visual_director.pexels_ok", scene_id=scene_id, label=split_label)
+                return clip_path, "video_clip", "pexels"
         except Exception as e:
             log.warning("visual_director.pexels_failed", scene_id=scene_id, label=split_label, error=str(e))
     else:
