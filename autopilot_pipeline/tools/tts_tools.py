@@ -77,6 +77,8 @@ def _resolve_exaggeration(emotion_tone: str | None) -> float:
 def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0.5) -> None:
     import torch
     try:
+        import os
+        os.environ['TRANSFORMERS_ATTN_IMPLEMENTATION'] = 'eager'
         from chatterbox.tts import ChatterboxTTS
     except ImportError:
         raise ImportError("chatterbox-tts not installed. Run: pip install chatterbox-tts")

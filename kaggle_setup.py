@@ -32,6 +32,7 @@ Known-good version matrix (tested on Kaggle T4, 2026-05):
 """
 from __future__ import annotations
 import subprocess, sys, os, importlib, time
+os.environ['TRANSFORMERS_ATTN_IMPLEMENTATION'] = 'eager'
 
 PIPELINE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "autopilot_pipeline")
@@ -56,7 +57,7 @@ def _run(label: str, args: list[str], critical: bool = True) -> bool:
 
 
 def _pip(*pkgs: str, flags: list[str] | None = None) -> list[str]:
-    base = [sys.executable, "-m", "pip", "install", "-q"]
+    base = [sys.executable, "-m", "pip", "install", "-q", "-U"]
     if flags:
         base += flags
     return base + list(pkgs)
@@ -103,9 +104,9 @@ CORE_PKGS = [
     "pydantic==2.7.4",
     "httpx==0.27.0",
     "pyyaml==6.0.2",
-    "langgraph==0.3.4",
-    "langchain==0.3.4",
-    "langchain-community==0.3.4",
+    "langgraph>=0.3.0",
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
     "tavily-python==0.5.0",
     "pytrends==4.9.2",
     "google-api-python-client==2.137.0",
@@ -184,7 +185,7 @@ CHECK_MODULES = [
     ("accelerate",    "accelerate",     lambda m: m.__version__),
     ("chatterbox",    "chatterbox.tts", lambda m: "✅ installed"),
     ("groq",          "groq",           lambda m: m.__version__),
-    ("langgraph",     "langgraph",      lambda m: m.__version__),
+    ("langgraph",     "langgraph",      lambda m: getattr(m, "__version__", "✅ installed")),
     ("edge_tts",      "edge_tts",       lambda m: getattr(m, "__version__", "✅")),
     ("structlog",     "structlog",      lambda m: m.__version__),
 ]
