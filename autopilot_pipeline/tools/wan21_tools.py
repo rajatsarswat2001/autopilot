@@ -3,13 +3,17 @@ tools/wan21_tools.py
 ─────────────────────────────────────────────────────────────────────────────
 Wan2.1 1.3B Text-to-Video wrapper for the AutoPilot pipeline.
 
-Model: Wan-AI/Wan2.1-T2V-1.3B  (Apache 2.0 — commercial use OK)
-VRAM:  ~8–10 GB with CPU offloading flags (fits Kaggle T4 16GB)
-Speed: ~4 minutes per 5s clip on T4 16GB
+Model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers  (Apache 2.0 — commercial use OK)
+VRAM:  ~8–9 GB (bfloat16 + VAE float32). Fits single T4 with CPU offloading.
+Speed: ~4 min per 5s clip on T4 single GPU; faster on 2x T4.
+
+Multi-GPU (Kaggle 2x T4):
+    Chatterbox TTS loads on cuda:0, Wan2.1 loads on cuda:1.
+    This maximises parallel availability and avoids VRAM contention.
 
 Usage:
     from tools.wan21_tools import generate_video_clip, is_wan21_available
-    
+
     if is_wan21_available():
         path = generate_video_clip(
             prompt="cinematic aerial view of a city, golden hour, 4K",
@@ -18,8 +22,9 @@ Usage:
         )
 
 Environment:
-    WAN21_MODEL_ID  — HuggingFace model ID (default: Wan-Video/Wan2.1-T2V-1.3B)
-    WAN21_ENABLED   — set to "0" to disable (forces Pexels fallback)
+    WAN21_MODEL_ID  — HuggingFace model ID
+                      default: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    WAN21_ENABLED   — set to "0" to disable and force image/Pollinations fallback
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -34,7 +39,8 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-_MODEL_ID  = os.getenv("WAN21_MODEL_ID", "Wan-Video/Wan2.1-T2V-1.3B")
+# Research (May 2026): correct HF model ID is Wan-AI org, not Wan-Video
+_MODEL_ID  = os.getenv("WAN21_MODEL_ID", "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
 _ENABLED   = os.getenv("WAN21_ENABLED", "1").strip() != "0"
 _PIPE      = None   # singleton model instance (loaded once per process)
 
@@ -69,23 +75,45 @@ def _load_pipeline():
     import torch
     from diffusers import AutoencoderKLWan, WanPipeline
     from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-    from transformers import AutoTokenizer, UMT5EncoderModel
 
     log.info("wan21.loading_model", model_id=_MODEL_ID)
     log.info("wan21.note", msg="First load downloads ~6GB weights — one-time only")
 
-    dtype = torch.float16
+    # VAE must be float32 for best decoding quality (per HF Wan2.1 docs)
+    vae = AutoencoderKLWan.from_pretrained(
+        _MODEL_ID, subfolder="vae", torch_dtype=torch.float32
+    )
 
-    # Load with CPU offloading to stay within 16GB T4 VRAM budget
+    # Use bfloat16 for the main pipeline (research recommendation for Wan2.1)
     _PIPE = WanPipeline.from_pretrained(
         _MODEL_ID,
-        torch_dtype=dtype,
+        vae=vae,
+        torch_dtype=torch.bfloat16,
     )
-    _PIPE.enable_model_cpu_offload()   # key: loads layers to GPU only when needed
-    _PIPE.enable_vae_slicing()         # reduces VAE VRAM peak
-    _PIPE.enable_attention_slicing()   # reduces attention VRAM peak
 
-    log.info("wan21.model_ready")
+    # Multi-GPU strategy: on 2x T4, use cuda:1 for Wan2.1
+    # This leaves cuda:0 free for Chatterbox TTS to run in parallel
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if num_gpus >= 2:
+        log.info("wan21.multi_gpu", gpus=num_gpus, wan21_device="cuda:1")
+        _PIPE = _PIPE.to("cuda:1")
+    elif num_gpus == 1:
+        # Single T4: use CPU offloading to keep within 15.6GB budget
+        log.info("wan21.single_gpu", device="cuda:0", mode="cpu_offload")
+        _PIPE.enable_model_cpu_offload()
+    # else: no GPU — pipeline will run on CPU (slow but functional)
+
+    # Memory optimisations (effective on both single and multi-GPU)
+    _PIPE.enable_vae_slicing()
+    _PIPE.enable_attention_slicing()
+
+    # UniPC scheduler tuned for 480P (flow_shift=3.0 per HF recommendation)
+    # Use flow_shift=5.0 for 720P if running on 14B model
+    _PIPE.scheduler = UniPCMultistepScheduler.from_config(
+        _PIPE.scheduler.config, flow_shift=3.0
+    )
+
+    log.info("wan21.model_ready", gpus=num_gpus)
     return _PIPE
 
 

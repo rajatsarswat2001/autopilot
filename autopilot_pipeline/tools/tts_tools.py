@@ -1,25 +1,28 @@
 """
 tools/tts_tools.py
 ─────────────────────────────────────────────────────────────────────────────
-TTSChain — 4-tier Text-to-Speech fallback system.
+TTSChain — 5-tier Text-to-Speech waterfall system.
 
-Tier 1: Chatterbox TTS (MIT licence, Resemble AI)
-         Best prosody, supports emotion_exaggeration parameter.
-         Requires: pip install chatterbox-tts  (or chatterbox-audio)
-         Model: ~1.8 GB, auto-downloads on first run.
+Tier 1: Chatterbox TTS  (GPU, MIT, Resemble AI)
+         Best prosody + emotion control. Runs on cuda:0.
+         On 2× T4: cuda:0 reserved for TTS, cuda:1 for Wan2.1 video.
+         Requires transformers==4.46.3 (install via kaggle_setup.py).
 
-Tier 2: NVIDIA Magpie NIM (cloud TTS microservice)
-         Requires: NVIDIA_API_KEY
+Tier 2: Kokoro-82M  (GPU/CPU, Apache 2.0, free)
+         82M params, 210× real-time on GPU, <2GB VRAM.
+         Best free TTS fallback. No API key. 50+ English voices.
+         Requires: pip install kokoro soundfile  +  apt install espeak-ng
 
-Tier 3: Edge TTS (Microsoft neural voices, FREE, no API key)
+Tier 3: NVIDIA Magpie NIM  (cloud TTS microservice)
+         Requires: NVIDIA_API_KEY env var.
+
+Tier 4: Edge TTS  (Microsoft neural voices, FREE)
          Requires: pip install edge-tts
-         Async under the hood, wrapped synchronously here.
 
-Tier 4: pyttsx3 (offline CPU, monotone but never fails)
+Tier 5: pyttsx3  (offline CPU, monotone, always available)
          Requires: pip install pyttsx3
 
-Each tier returns the tier name string on success and raises on failure,
-allowing TTSChain to advance to the next tier.
+Each tier raises on failure; TTSChain advances to the next tier.
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -34,7 +37,7 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-TtsTier = Literal["chatterbox", "magpie", "edge", "pyttsx3"]
+TtsTier = Literal["chatterbox", "kokoro", "magpie", "edge", "pyttsx3"]
 
 EDGE_VOICE    = os.getenv("EDGE_TTS_VOICE",    "en-US-GuyNeural")
 PYTTSX3_RATE  = int(os.getenv("PYTTSX3_RATE",  "165"))
@@ -83,7 +86,12 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
     except ImportError:
         raise ImportError("chatterbox-tts not installed. Run: pip install chatterbox-tts")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Pin to cuda:0 — on 2x T4, cuda:1 is reserved for Wan2.1 video generation
+    if torch.cuda.is_available():
+        device = "cuda:0"
+    else:
+        device = "cpu"
+
     model = ChatterboxTTS.from_pretrained(device=device)
 
     wav = model.generate(
@@ -102,6 +110,42 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
 
     log.debug("tts.chatterbox_ok", chars=len(text), path=output_path,
               exaggeration=emotion_exaggeration)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tier 2: Kokoro-82M (Apache 2.0, 82M params, 210x RT on GPU)
+# Best free TTS fallback — cleaner than Edge TTS, no API key, <2GB VRAM
+# 50+ English voices: af_heart, af_bella, am_adam, bf_emma, bm_george ...
+# ─────────────────────────────────────────────────────────────────────────────
+
+KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_heart")  # American English female
+
+
+def _tts_kokoro(text: str, output_path: str) -> None:
+    try:
+        from kokoro import KPipeline
+    except ImportError:
+        raise ImportError(
+            "kokoro not installed. Run: pip install kokoro soundfile "
+            "and: apt install espeak-ng"
+        )
+
+    import soundfile as sf
+    import numpy as np
+
+    pipeline = KPipeline(lang_code="a")  # 'a' = American English
+    generator = pipeline(text, voice=KOKORO_VOICE)
+
+    chunks = []
+    for _, _, audio in generator:
+        chunks.append(audio)
+
+    if not chunks:
+        raise RuntimeError("Kokoro produced no audio chunks")
+
+    combined = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+    sf.write(output_path, combined, 24000)
+    log.debug("tts.kokoro_ok", voice=KOKORO_VOICE, chars=len(text), path=output_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,6 +250,7 @@ class TTSChain:
 
         tiers: list[tuple[TtsTier, callable]] = [
             ("chatterbox", lambda: _tts_chatterbox(text, output_path, emotion_exaggeration)),
+            ("kokoro",     lambda: _tts_kokoro(text, output_path)),
             ("magpie",     lambda: _tts_magpie(text, output_path)),
             ("edge",       lambda: _tts_edge(text, output_path)),
             ("pyttsx3",    lambda: _tts_pyttsx3(text, output_path)),
