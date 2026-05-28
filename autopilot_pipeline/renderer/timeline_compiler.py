@@ -145,7 +145,7 @@ def _compile_clip(clip: TimelineClip, fps: int, cache: ClipCache) -> CompiledCli
     half_dur    = duration / 2.0
 
     # ── Cache check ───────────────────────────────────────────────────────────
-    cache_key   = cache.key(f"{clip.visual_path_A}_{clip.visual_path_B}", clip.audio_path, duration)
+    cache_key   = cache.key(f"{clip.visual_path_A}|{clip.visual_path_B}", clip.audio_path, duration)
     cached_path = cache.get(cache_key)
     if cached_path:
         log.debug("compiler.cache_hit", scene_id=scene_id)

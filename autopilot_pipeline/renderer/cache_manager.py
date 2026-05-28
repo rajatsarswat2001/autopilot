@@ -63,9 +63,12 @@ class ClipCache:
         """Generate a deterministic cache key for a (visual, audio, duration) triple."""
         # Use file size as a fast proxy for content hash
         try:
-            v_size = Path(visual_path).stat().st_size
+            if "|" in visual_path:
+                v_size = sum(Path(p).stat().st_size for p in visual_path.split("|") if Path(p).exists())
+            else:
+                v_size = Path(visual_path).stat().st_size
             a_size = Path(audio_path).stat().st_size
-        except FileNotFoundError:
+        except Exception:
             v_size = a_size = 0
 
         raw = f"{visual_path}|{v_size}|{audio_path}|{a_size}|{duration_s:.3f}"
