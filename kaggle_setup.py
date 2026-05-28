@@ -120,7 +120,7 @@ print("\n[3/7] GPU packages (transformers, diffusers, accelerate)...")
 GPU_PKGS = [
     "numpy==1.26.4",                 # prevent resolver from bumping
     "transformers==4.44.2",          # pinned — works with Wan2.1 + chatterbox
-    "diffusers==0.31.0",             # pinned — Wan2.1 WanPipeline
+    "diffusers>=0.33.0",             # Wan2.1 WanPipeline support
     "accelerate==0.34.2",            # pinned — model CPU offloading
     "sentencepiece==0.2.0",          # Wan2.1 tokenizer
     "safetensors==0.4.5",            # model loading
@@ -136,13 +136,13 @@ print("\n[4/7] Chatterbox TTS (MIT, best free voice)...")
 _run("chatterbox-tts", _pip("chatterbox-tts"), critical=False)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 — Force-reinstall numpy AFTER chatterbox
-# Chatterbox's dependency resolver may have bumped numpy to 2.x.
-# This step is non-negotiable.
+# STEP 5 — Force-reinstall numpy + scipy AFTER chatterbox
+# Chatterbox's dependency resolver may have bumped numpy to 2.x, which breaks scipy.
+# Reinstalling them together guarantees binary compatibility.
 # ─────────────────────────────────────────────────────────────────────────────
-print("\n[5/7] Force-reinstalling numpy==1.26.4 (post-chatterbox lock)...")
-_run("numpy==1.26.4 (force reinstall)",
-     _pip("numpy==1.26.4", flags=["--force-reinstall"]))
+print("\n[5/7] Force-reinstalling numpy==1.26.4 & scipy>=1.12.0...")
+_run("numpy & scipy (force reinstall)",
+     _pip("numpy==1.26.4", "scipy>=1.12.0", flags=["--force-reinstall"]))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 6 — Output directories
@@ -162,12 +162,24 @@ print(f"  ✅  {len(DIRS)} directories created")
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n[7/7] Verifying imports...")
 
+def _check_wan(m):
+    if not hasattr(m, "WanPipeline"):
+        raise ImportError("WanPipeline missing from diffusers! Ensure diffusers>=0.33.0 is installed.")
+    return "✅ WanPipeline available"
+
+def _check_scipy_ufunc(m):
+    # Verify ufuncs can be executed without ValueError
+    res = m.sph_legendre_p(0, 0, 0)
+    return "✅ sph_legendre_p functional"
+
 CHECK_MODULES = [
     ("numpy",         "numpy",          lambda m: m.__version__),
+    ("scipy ufuncs",  "scipy.special",  _check_scipy_ufunc),
     ("torch",         "torch",          lambda m: m.__version__
                                         + f" | CUDA: {m.cuda.is_available()}"
                                         + (f" | GPU: {m.cuda.get_device_name(0)}" if m.cuda.is_available() else "")),
     ("diffusers",     "diffusers",      lambda m: m.__version__),
+    ("WanPipeline",   "diffusers",      _check_wan),
     ("transformers",  "transformers",   lambda m: m.__version__),
     ("accelerate",    "accelerate",     lambda m: m.__version__),
     ("chatterbox",    "chatterbox.tts", lambda m: "✅ installed"),
