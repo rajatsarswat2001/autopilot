@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# requirements-gpu.txt — Kaggle T4 GPU-specific packages
+#
+# Install AFTER requirements.txt:
+#   pip install -r requirements-gpu.txt
+#
+# VRAM budget on Kaggle T4 (16GB total):
+#   Chatterbox TTS   ~2 GB
+#   Wan2.1 1.3B      ~8 GB (with CPU offloading)
+#   ACE-Step 1.5     ~4 GB
+#   ─────────────────────
+#   Peak usage       ~10-12 GB (sequential — not all loaded at once)
+#   Safety headroom  ~4-6 GB
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── PyTorch (pre-installed on Kaggle — listed for local dev only) ──────────────
+torch>=2.3.0
+torchaudio>=2.3.0
+
+# ── Diffusers (Wan2.1 video generation) ───────────────────────────────────────
+diffusers>=0.31.0
+transformers>=4.42.0
+accelerate>=0.31.0
+sentencepiece>=0.2.0              # required by Wan2.1 T5 tokenizer
+imageio>=2.34.0                   # frame export for Wan2.1
+imageio-ffmpeg>=0.5.1
+
+# ── Chatterbox TTS (MIT, best free voice) ─────────────────────────────────────
+chatterbox-tts>=0.1.0
+
+# ── ACE-Step music generation (MIT, Suno-quality) ─────────────────────────────
+# Install from GitHub (pip package may lag behind releases):
+# pip install git+https://github.com/stepfun-ai/ACE-Step.git
+# Or if PyPI package is available:
+acestep>=0.1.0

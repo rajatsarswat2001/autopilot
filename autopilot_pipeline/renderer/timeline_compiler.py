@@ -116,14 +116,36 @@ def compile_timeline(manifest: TimelineManifest) -> RenderPlan:
     return plan
 
 
+def _compile_visual(visual_path: str, visual_type: str, ken_burns: bool, width: int, height: int, duration: float, fps: int, scene_id: int, sub_label: str) -> str:
+    out_path = str(SCRATCH_DIR / f"clip_{scene_id:03d}_{sub_label}.mp4")
+    if visual_type == "image" or ken_burns:
+        try:
+            create_ken_burns_effect(
+                input_image_path=visual_path,
+                output_video_path=out_path,
+                duration_s=duration,
+                resolution=f"{width}x{height}",
+                frame_rate=fps,
+            )
+            return out_path
+        except Exception as e:
+            log.warning("compiler.kb_failed", scene_id=scene_id, label=sub_label, error=str(e))
+    elif visual_type == "video_clip":
+        try:
+            loop_video_to_duration(visual_path, out_path, duration_s=duration)
+            return out_path
+        except Exception as e:
+            log.warning("compiler.loop_failed", scene_id=scene_id, label=sub_label, error=str(e))
+    return visual_path
+
 def _compile_clip(clip: TimelineClip, fps: int, cache: ClipCache) -> CompiledClip:
     """Resolve one TimelineClip into a CompiledClip ready for FFmpeg."""
     scene_id    = clip.scene_id
     duration    = clip.duration_s
-    visual_path = clip.visual_path
+    half_dur    = duration / 2.0
 
     # ── Cache check ───────────────────────────────────────────────────────────
-    cache_key   = cache.key(visual_path, clip.audio_path, duration)
+    cache_key   = cache.key(f"{clip.visual_path_A}_{clip.visual_path_B}", clip.audio_path, duration)
     cached_path = cache.get(cache_key)
     if cached_path:
         log.debug("compiler.cache_hit", scene_id=scene_id)
@@ -140,34 +162,34 @@ def _compile_clip(clip: TimelineClip, fps: int, cache: ClipCache) -> CompiledCli
             status="cached",
         )
 
-    # ── Image → video conversion (Ken Burns) ─────────────────────────────────
-    out_path = str(SCRATCH_DIR / f"clip_{scene_id:03d}.mp4")
+    path_a = _compile_visual(clip.visual_path_A, clip.visual_type_A, clip.ken_burns_A, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "A")
+    path_b = _compile_visual(clip.visual_path_B, clip.visual_type_B, clip.ken_burns_B, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "B")
 
-    if clip.visual_type == "image" or clip.ken_burns:
-        try:
-            create_ken_burns_effect(
-                input_image_path=visual_path,
-                output_video_path=out_path,
-                duration_s=duration,
-                resolution=f"{clip.visual_width}x{clip.visual_height}",
-                frame_rate=fps,
-            )
-            visual_path = out_path
-            status = "needs_kb"
-        except Exception as e:
-            log.warning("compiler.kb_failed", scene_id=scene_id, error=str(e))
-            status = "needs_render"
-
-    # ── Video loop if clip is shorter than required ───────────────────────────
-    elif clip.visual_type == "video_clip":
-        try:
-            loop_video_to_duration(visual_path, out_path, duration_s=duration)
-            visual_path = out_path
-            status = "needs_loop"
-        except Exception as e:
-            log.warning("compiler.loop_failed", scene_id=scene_id, error=str(e))
-            status = "needs_render"
-    else:
+    import subprocess
+    visual_path = str(SCRATCH_DIR / f"clip_{scene_id:03d}_merged.mp4")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", path_a,
+                "-i", path_b,
+                "-filter_complex",
+                f"[0:v]scale={clip.visual_width}:{clip.visual_height}:force_original_aspect_ratio=decrease,pad={clip.visual_width}:{clip.visual_height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v0];"
+                f"[1:v]scale={clip.visual_width}:{clip.visual_height}:force_original_aspect_ratio=decrease,pad={clip.visual_width}:{clip.visual_height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v1];"
+                f"[v0][v1]concat=n=2:v=1:a=0[v]",
+                "-map", "[v]",
+                "-t", str(duration),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "20",
+                visual_path,
+            ],
+            check=True, capture_output=True, timeout=120
+        )
+        status = "needs_render"
+    except Exception as e:
+        log.error("compiler.merge_failed", scene_id=scene_id, error=str(e))
+        visual_path = path_a
         status = "needs_render"
 
     cache.put(cache_key, visual_path)

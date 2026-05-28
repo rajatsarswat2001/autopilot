@@ -22,17 +22,22 @@ llm:
     max_tokens: 4096
     rpm_limit: 40               # NIM free-tier
   fallback_1:
+    provider: "claude"
+    model: "claude-3-5-sonnet-latest"
+    temperature: 0.80
+    max_tokens: 4096
+  fallback_2:
     provider: "openai"
     model: "gpt-4o-mini"
     temperature: 0.80
     max_tokens: 4096
-  fallback_2:
+  fallback_3:
     provider: "gemini"
     model: "gemini-2.0-flash"
     base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
     temperature: 0.80
     max_tokens: 4096
-  fallback_3:
+  fallback_4:
     provider: "ollama"
     model: "llama3:8b-instruct-q4_K_M"
     base_url: "http://localhost:11434/v1"

@@ -148,7 +148,7 @@ def build_word_timings(
     for scene in scenes:
         scene_id  = scene.get("scene_id", 0)
         narration = _clean_text(scene.get("narration", ""))
-        duration  = float(scene.get("duration_hint_s") or 0.0)
+        duration  = float(scene.get("duration_s") or scene.get("duration_hint_s") or 0.0)
 
         if not narration:
             cursor += duration
@@ -326,7 +326,10 @@ def generate_captions(
             sid = s.get("scene_id", 0)
             merged = dict(s)
             if sid in timing_scenes:
-                merged["duration_hint_s"] = timing_scenes[sid].get("duration_hint_s", 0)
+                ts = timing_scenes[sid]
+                # AudioScene uses duration_s; fall back to duration_hint_s for compat
+                dur = ts.get("duration_s") or ts.get("duration_hint_s") or 0
+                merged["duration_s"] = float(dur)
             scenes.append(merged)
 
         word_timings = build_word_timings(scenes)

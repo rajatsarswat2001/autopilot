@@ -31,6 +31,7 @@ import structlog
 from contracts.visual_manifest import VisualManifest, VisualScene
 from contracts.timing_manifest import TimingManifest
 from tools.pexels_tools import search_and_download_video
+from tools.wan21_tools import generate_video_clip, is_wan21_available
 import requests
 from urllib.parse import quote as url_encode
 from workflows.pipeline_state import AgentError, PipelineState
@@ -46,7 +47,7 @@ _MAX_WORKERS = int(os.getenv("VISUAL_PARALLEL_WORKERS", "4"))
 # Placeholder generator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_placeholder(scene_id: int, mood: str, out_dir: Path) -> str:
+def _make_placeholder(scene_id: int, mood: str, out_dir: Path, split_label: str = "") -> str:
     """Generate a mood-coloured gradient PNG as last-resort placeholder."""
     try:
         from PIL import Image, ImageDraw
@@ -68,7 +69,8 @@ def _make_placeholder(scene_id: int, mood: str, out_dir: Path) -> str:
             g = int(c1[1] + (c2[1] - c1[1]) * t)
             b = int(c1[2] + (c2[2] - c1[2]) * t)
             draw.line([(x, 0), (x, 1080)], fill=(r, g, b))
-        path = out_dir / f"placeholder_{scene_id:03d}.png"
+        label_suffix = f"_{split_label}" if split_label else ""
+        path = out_dir / f"placeholder_{scene_id:03d}{label_suffix}.png"
         img.save(str(path))
         return str(path)
     except ImportError:
@@ -85,7 +87,8 @@ def _make_placeholder(scene_id: int, mood: str, out_dir: Path) -> str:
             + _png_chunk(b"IDAT", compressed)
             + _png_chunk(b"IEND", b"")
         )
-        path = out_dir / f"placeholder_{scene_id:03d}.png"
+        label_suffix = f"_{split_label}" if split_label else ""
+        path = out_dir / f"placeholder_{scene_id:03d}{label_suffix}.png"
         path.write_bytes(png)
         return str(path)
 
@@ -94,97 +97,94 @@ def _make_placeholder(scene_id: int, mood: str, out_dir: Path) -> str:
 # Per-scene sourcing helper (runs inside thread pool)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _source_asset(keyword: str, prompt: str, mood: str, out_dir: Path, video_id: str, scene_id: int, split_label: str, orientation: str, duration_s: float = 5.0, niche: str = "default") -> tuple[str, str, str]:
+    # ── Tier 1: Wan2.1 1.3B AI Video (Kaggle T4 GPU) ──────────────────────────
+    if is_wan21_available() and prompt:
+        clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_wan.mp4")
+        result = generate_video_clip(
+            prompt=prompt,
+            output_path=clip_path,
+            duration_s=duration_s,
+            niche=niche,
+        )
+        if result:
+            log.info("visual_director.wan21_ok", scene_id=scene_id, label=split_label)
+            return result, "video_clip", "wan21"
+        log.warning("visual_director.wan21_failed_falling_back", scene_id=scene_id)
+
+    # ── Tier 2: Pexels video clip ─────────────────────────────────────────────
+    try:
+        clip_path = search_and_download_video(
+            keyword=keyword,
+            output_dir=str(out_dir),
+            filename=f"{video_id}_scene_{scene_id:03d}_{split_label}.mp4",
+            orientation=orientation,
+        )
+        if clip_path:
+            log.info("visual_director.pexels_ok", scene_id=scene_id, label=split_label)
+            return clip_path, "video_clip", "pexels"
+    except Exception as e:
+        log.warning("visual_director.pexels_failed", scene_id=scene_id, label=split_label, error=str(e))
+
+    # ── Tier 3: Generative still via Pollinations AI ──────────────────────────
+    try:
+        w, h = (1080, 1920) if orientation in ("portrait", "reel", "short") else (1920, 1080)
+        encoded = url_encode(prompt)
+        poll_url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true&model=flux"
+        resp = requests.get(poll_url, stream=True, timeout=45)
+        resp.raise_for_status()
+        img_out = out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}.png"
+        with open(img_out, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        if img_out.stat().st_size > 10_000:
+            log.info("visual_director.pollinations_ok", scene_id=scene_id, label=split_label)
+            return str(img_out), "image", "pollinations"
+    except Exception as e:
+        log.warning("visual_director.pollinations_failed", scene_id=scene_id, label=split_label, error=str(e))
+
+    # ── Tier 4: Placeholder ───────────────────────────────────────────────────
+    log.warning("visual_director.using_placeholder", scene_id=scene_id, label=split_label)
+    return _make_placeholder(scene_id, mood, out_dir, split_label), "placeholder", "placeholder"
+
 def _source_scene(
     scene: dict,
     scene_index: int,
     video_id: str,
     out_dir: Path,
 ) -> VisualScene:
-    """
-    Source a visual asset for one scene.
-    Tries Pexels → SDXL/NIM → placeholder in order.
-    Thread-safe: each call writes to independent file paths.
-    """
     scene_id = scene["scene_id"]
-    keyword  = scene.get("b_roll_keyword", "")
-    prompt   = scene.get("visual_prompt", "")
-    mood     = scene.get("mood", "neutral")
-    motion   = MOTION_CYCLE[scene_index % len(MOTION_CYCLE)]
+    mood     = scene.get("emotional_tone", "neutral")
+    motion_a = MOTION_CYCLE[(scene_index * 2) % len(MOTION_CYCLE)]
+    motion_b = MOTION_CYCLE[(scene_index * 2 + 1) % len(MOTION_CYCLE)]
 
-    log.info("visual_director.scene", scene_id=scene_id, keyword=keyword)
+    log.info("visual_director.scene", scene_id=scene_id)
 
-    asset_path: str | None = None
-    source     = "placeholder"
-    asset_type = "placeholder"
-
-    # Decide orientation early (used for Pexels and generative image)
     orientation = os.environ.get("FORMAT", "youtube").lower()
     pexels_orientation = "portrait" if orientation in ("reel", "short") else "landscape"
 
-    # ── Tier 1: Pexels video clip ────────────────────────────────────────────
-    try:
-        clip_path = search_and_download_video(
-            keyword=keyword,
-            output_dir=str(out_dir),
-            filename=f"{video_id}_scene_{scene_id:03d}.mp4",
-            orientation=pexels_orientation,
-        )
-        if clip_path:
-            asset_path = clip_path
-            source     = "pexels"
-            asset_type = "video_clip"
-            log.info("visual_director.pexels_ok", scene_id=scene_id)
-    except Exception as e:
-        log.warning("visual_director.pexels_failed", scene_id=scene_id, error=str(e))
+    niche    = os.environ.get("NICHE", "default")
+    kw_a = scene.get("b_roll_keyword_A", "")
+    pr_a = scene.get("visual_prompt_A", "")
+    path_a, type_a, src_a = _source_asset(kw_a, pr_a, mood, out_dir, video_id, scene_id, "A", pexels_orientation, duration_s=5.0, niche=niche)
 
-    # ── Tier 2: Generative still via Pollinations AI ─────────────────────────
-    if not asset_path:
-        try:
-            # Request Pollinations to generate an image with desired dimensions
-            orientation = os.environ.get("FORMAT", "youtube").lower()
-            if orientation in ("reel", "short"):
-                w, h = 1080, 1920
-            else:
-                w, h = 1920, 1080
+    kw_b = scene.get("b_roll_keyword_B", "")
+    pr_b = scene.get("visual_prompt_B", "")
+    path_b, type_b, src_b = _source_asset(kw_b, pr_b, mood, out_dir, video_id, scene_id, "B", pexels_orientation, duration_s=5.0, niche=niche)
 
-            encoded = url_encode(prompt)
-            poll_url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true"
-            resp = requests.get(poll_url, stream=True, timeout=30)
-            resp.raise_for_status()
-            img_out = out_dir / f"{video_id}_scene_{scene_id:03d}.png"
-            with open(img_out, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            asset_path = str(img_out)
-            source = "pollinations"
-            asset_type = "image"
-            log.info("visual_director.pollinations_ok", scene_id=scene_id)
-        except Exception as e:
-            log.warning("visual_director.pollinations_failed", scene_id=scene_id, error=str(e))
-
-    # ── Tier 3: Placeholder ───────────────────────────────────────────────────
-    if not asset_path:
-        asset_path = _make_placeholder(scene_id, mood, out_dir)
-        source     = "placeholder"
-        asset_type = "placeholder"
-        log.warning("visual_director.using_placeholder", scene_id=scene_id)
-
-    # Choose scene dimensions based on requested format
-    orientation = os.environ.get("FORMAT", "youtube").lower()
-    if orientation in ("reel", "short"):
-        width, height = 1080, 1920
-    else:
-        width, height = 1920, 1080
+    width, height = (1080, 1920) if orientation in ("reel", "short") else (1920, 1080)
 
     return VisualScene(
         scene_id=scene_id,
-        asset_path=asset_path,
-        asset_type=asset_type,
-        source=source,
+        asset_path_A=path_a, asset_path_B=path_b,
+        asset_type_A=type_a, asset_type_B=type_b,
+        source_A=src_a, source_B=src_b,
         width=width,
         height=height,
-        needs_ken_burns=(asset_type in ("image", "placeholder")),
-        motion_direction=motion if asset_type in ("image", "placeholder") else None,
+        needs_ken_burns_A=(type_a in ("image", "placeholder")),
+        needs_ken_burns_B=(type_b in ("image", "placeholder")),
+        motion_direction_A=motion_a if type_a in ("image", "placeholder") else None,
+        motion_direction_B=motion_b if type_b in ("image", "placeholder") else None,
     )
 
 
@@ -230,17 +230,16 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
             except Exception as e:
                 log.error("visual_director.scene_exception", scene_id=scene_id, error=str(e))
                 matching = next((s for s in scenes if s["scene_id"] == scene_id), {})
-                placeholder_path = _make_placeholder(
-                    scene_id, matching.get("mood", "neutral"), VISUAL_DIR
-                )
+                placeholder_a = _make_placeholder(scene_id, matching.get("emotional_tone", "neutral"), VISUAL_DIR, "A")
+                placeholder_b = _make_placeholder(scene_id, matching.get("emotional_tone", "neutral"), VISUAL_DIR, "B")
                 results[scene_id] = VisualScene(
                     scene_id=scene_id,
-                    asset_path=placeholder_path,
-                    asset_type="placeholder",
-                    source="placeholder",
+                    asset_path_A=placeholder_a, asset_path_B=placeholder_b,
+                    asset_type_A="placeholder", asset_type_B="placeholder",
+                    source_A="placeholder", source_B="placeholder",
                     width=1920, height=1080,
-                    needs_ken_burns=True,
-                    motion_direction="zoom_in",
+                    needs_ken_burns_A=True, needs_ken_burns_B=True,
+                    motion_direction_A="zoom_in", motion_direction_B="zoom_out",
                 )
 
     # ── Reassemble in scene order ─────────────────────────────────────────────

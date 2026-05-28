@@ -40,6 +40,35 @@ EDGE_VOICE    = os.getenv("EDGE_TTS_VOICE",    "en-US-GuyNeural")
 PYTTSX3_RATE  = int(os.getenv("PYTTSX3_RATE",  "165"))
 MAGPIE_VOICE  = os.getenv("MAGPIE_VOICE",      "English-US.Female-1")
 
+# Chatterbox emotion → exaggeration mapping
+# Chatterbox's exaggeration range: 0.0 (monotone) → 1.0 (very dramatic)
+_TONE_EXAGGERATION: dict[str, float] = {
+    "urgent":       0.85,
+    "dramatic":     0.90,
+    "shocking":     0.80,
+    "curious":      0.55,
+    "inspiring":    0.65,
+    "hopeful":      0.60,
+    "melancholic":  0.45,
+    "warm":         0.50,
+    "authoritative":0.40,
+    "neutral":      0.35,
+    "default":      0.50,
+}
+
+def _resolve_exaggeration(emotion_tone: str | None) -> float:
+    """Return exaggeration value for a given emotional tone string."""
+    # Global override from env var takes priority
+    env_val = os.getenv("CHATTERBOX_EXAGGERATION", "")
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+    if not emotion_tone:
+        return 0.5
+    return _TONE_EXAGGERATION.get(emotion_tone.lower(), 0.5)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier 1: Chatterbox
@@ -63,7 +92,14 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
 
     import torchaudio
     torchaudio.save(output_path, wav, model.sr)
-    log.debug("tts.chatterbox_ok", chars=len(text), path=output_path)
+
+    # Clear GPU cache after synthesis to free space for Wan2.1 / ACE-Step
+    if torch.cuda.is_available():
+        del model
+        torch.cuda.empty_cache()
+
+    log.debug("tts.chatterbox_ok", chars=len(text), path=output_path,
+              exaggeration=emotion_exaggeration)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,7 +196,12 @@ class TTSChain:
         text: str,
         output_path: str,
         emotion_exaggeration: float = 0.5,
+        emotion_tone: str | None = None,  # if set, overrides emotion_exaggeration
     ) -> TtsTier:
+        # Resolve final exaggeration from tone (takes priority over raw float)
+        if emotion_tone:
+            emotion_exaggeration = _resolve_exaggeration(emotion_tone)
+
         tiers: list[tuple[TtsTier, callable]] = [
             ("chatterbox", lambda: _tts_chatterbox(text, output_path, emotion_exaggeration)),
             ("magpie",     lambda: _tts_magpie(text, output_path)),

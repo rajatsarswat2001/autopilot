@@ -47,14 +47,19 @@ class Scene(BaseModel):
         ..., min_length=20,
         description="Voiceover text; 1–3 natural-sounding sentences"
     )
-    visual_prompt: str = Field(
+    visual_prompt_A: str = Field(
         ..., min_length=10,
-        description="Detailed image/video generation prompt"
+        description="Detailed image/video generation prompt for the first half of the scene"
     )
-    b_roll_keyword: str = Field(..., description="2–4 word Pexels search query")
-    mood: Literal["tense", "curious", "inspiring", "shocking", "warm", "neutral", "dramatic"] = "neutral"
+    b_roll_keyword_A: str = Field(..., description="2–4 word Pexels search query for the first half")
+    visual_prompt_B: str = Field(
+        ..., min_length=10,
+        description="Detailed image/video generation prompt for the second half of the scene (A/B split)"
+    )
+    b_roll_keyword_B: str = Field(..., description="2–4 word Pexels search query for the second half")
+    emotional_tone: Literal["tense", "curious", "inspiring", "shocking", "warm", "neutral", "dramatic"] = "neutral"
 
-    @field_validator("mood", mode="before")
+    @field_validator("emotional_tone", mode="before")
     @classmethod
     def normalise_mood(cls, v: Any) -> str:
         """Silently map LLM-invented mood words to valid enum values."""
@@ -68,7 +73,8 @@ class Scene(BaseModel):
 
     # Filled by downstream agents — None until populated
     duration_hint_s: Optional[float] = Field(None, description="Set by Audio Agent after TTS")
-    visual_asset_path: Optional[str] = Field(None, description="Set by Visual Director")
+    visual_asset_path_A: Optional[str] = Field(None, description="Set by Visual Director (First half)")
+    visual_asset_path_B: Optional[str] = Field(None, description="Set by Visual Director (Second half)")
     audio_path: Optional[str] = Field(None, description="Set by Audio Agent")
 
     @field_validator("narration")

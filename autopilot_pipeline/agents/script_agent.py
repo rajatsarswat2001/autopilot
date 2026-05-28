@@ -52,7 +52,7 @@ You are an expert YouTube scriptwriter specialising in high-CPM educational cont
 
 RULES (non-negotiable):
 1. Open with a BOLD hook that exploits loss aversion or curiosity.
-2. Use a NARRATIVE ARC — setup → complication → resolution.
+2. Structure the narrative strictly: HOOK -> CONTEXT -> MECHANISM -> TWIST -> CTA.
 3. Inject at least ONE surprising fact or counter-intuitive claim.
 4. Add ONE personal-sounding anecdote or first-person observation.
 5. NEVER use: "in conclusion", "as we can see", "it is worth noting",
@@ -72,9 +72,11 @@ _SCHEMA = """\
     {
       "scene_id": <int, start at 1, sequential>,
       "narration": "<1-3 sentences of voiceover, conversational tone>",
-      "visual_prompt": "<detailed image generation prompt, cinematic>",
-      "b_roll_keyword": "<2-4 word Pexels search query>",
-      "mood": "<tense|curious|inspiring|shocking|warm|neutral|dramatic>",
+      "visual_prompt_A": "<detailed image generation prompt for first half of sentence>",
+      "b_roll_keyword_A": "<2-4 word Pexels search query>",
+      "visual_prompt_B": "<detailed image generation prompt for second half of sentence>",
+      "b_roll_keyword_B": "<2-4 word Pexels search query>",
+      "emotional_tone": "<tense|curious|inspiring|shocking|warm|neutral|dramatic>",
       "emotion_exaggeration": <0.0-1.0>
     }
   ],

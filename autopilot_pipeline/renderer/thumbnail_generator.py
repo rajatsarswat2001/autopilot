@@ -1,7 +1,15 @@
 """
 renderer/thumbnail_generator.py
 ─────────────────────────────────────────────────────────────────────────────
-Create YouTube thumbnails by extracting a frame and overlaying title text.
+Create YouTube thumbnails:
+  1. Generate a cinematic background via FLUX.1 through Pollinations AI (free)
+  2. Overlay bold title text using a downloaded Google Font (Oswald-Bold)
+  3. Fallback: extract a video frame if FLUX call fails
+
+Font resolution order:
+  1. THUMBNAIL_FONT_PATH env var (custom font)
+  2. ~/.cache/autopilot/Oswald-Bold.ttf  (auto-downloaded once)
+  3. PIL default (8px bitmap — last resort only)
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -9,16 +17,83 @@ from __future__ import annotations
 import os
 import subprocess
 import textwrap
+import urllib.request
 import uuid
 from pathlib import Path
 
+import structlog
 from PIL import Image, ImageDraw, ImageFont
 
+log = structlog.get_logger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Font resolution
+# ─────────────────────────────────────────────────────────────────────────────
+_FONT_CACHE_DIR = Path.home() / ".cache" / "autopilot"
+_FONT_CACHE_PATH = _FONT_CACHE_DIR / "Oswald-Bold.ttf"
+_FONT_URL = (
+    "https://github.com/google/fonts/raw/main/ofl/oswald/static/Oswald-Bold.ttf"
+)
+
+
+def _resolve_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Return the best available font at the requested size."""
+    # 1. User-specified
+    custom = os.getenv("THUMBNAIL_FONT_PATH", "")
+    if custom and Path(custom).exists():
+        try:
+            return ImageFont.truetype(custom, size)
+        except Exception:
+            pass
+
+    # 2. Cached Google Font
+    if not _FONT_CACHE_PATH.exists():
+        try:
+            _FONT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            log.info("thumbnail.downloading_font", url=_FONT_URL)
+            urllib.request.urlretrieve(_FONT_URL, _FONT_CACHE_PATH)
+        except Exception as e:
+            log.warning("thumbnail.font_download_failed", error=str(e))
+
+    if _FONT_CACHE_PATH.exists():
+        try:
+            return ImageFont.truetype(str(_FONT_CACHE_PATH), size)
+        except Exception:
+            pass
+
+    # 3. PIL default (small but never fails)
+    log.warning("thumbnail.using_default_font")
+    return ImageFont.load_default()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FLUX background via Pollinations AI (free, no key)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _generate_flux_background(prompt: str, output_path: str, width: int = 1280, height: int = 720) -> bool:
+    """
+    Generate a cinematic thumbnail background using FLUX.1 via Pollinations AI.
+    Completely free — no API key required.
+    """
+    import urllib.parse
+    safe_prompt = urllib.parse.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={width}&height={height}&model=flux&nologo=true&enhance=true"
+    try:
+        urllib.request.urlretrieve(url, output_path)
+        if Path(output_path).stat().st_size > 10_000:
+            log.info("thumbnail.flux_bg_ok", path=output_path)
+            return True
+    except Exception as e:
+        log.warning("thumbnail.flux_bg_failed", error=str(e))
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Frame extraction fallback
+# ─────────────────────────────────────────────────────────────────────────────
 
 def extract_frame(video_path: str, frame_output_path: str, timestamp: str = "00:00:03") -> bool:
-    """
-    Extract a single frame from a video at a specific timestamp using FFmpeg.
-    """
+    """Extract a single frame from a video at a specific timestamp using FFmpeg."""
     cmd = [
         "ffmpeg", "-y",
         "-ss", timestamp,
@@ -31,63 +106,100 @@ def extract_frame(video_path: str, frame_output_path: str, timestamp: str = "00:
         return True
     except subprocess.CalledProcessError as e:
         err = e.stderr.decode(errors="ignore")
-        print(f"Error extracting frame from {video_path}: {err}")
+        log.warning("thumbnail.frame_extract_failed", error=err[:200])
         return False
 
 
-def create_thumbnail(video_path: str, title_text: str, output_path: str, font_path: str = "font.ttf") -> str | None:
-    """
-    Create a thumbnail by overlaying text on a frame extracted from the video.
-    """
-    temp_frame_path = str(Path(output_path).with_name(f"thumb_frame_{uuid.uuid4().hex}.jpg"))
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
 
-    if not extract_frame(video_path, temp_frame_path):
-        print("Aborting thumbnail creation due to frame extraction failure.")
+def create_thumbnail(
+    video_path: str,
+    title_text: str,
+    output_path: str,
+    niche: str = "default",
+    font_path: str | None = None,   # kept for backward compat (ignored; use env var)
+) -> str | None:
+    """
+    Create a cinematic YouTube thumbnail:
+      1. Try FLUX.1 via Pollinations for an AI-generated background
+      2. Fall back to extracting a frame from the rendered video
+      3. Overlay bold title text with drop shadow
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    tmp_bg = str(Path(output_path).with_name(f"thumb_bg_{uuid.uuid4().hex}.jpg"))
+
+    # ── Background ──────────────────────────────────────────────────────────
+    # Build a cinematic FLUX prompt from the title
+    niche_style_map = {
+        "personal_finance": "dramatic financial charts, city skyline at dusk, cinematic lighting",
+        "saas_tools":       "futuristic tech interface, dark UI glow, cyberpunk aesthetic",
+        "legal_tax":        "scales of justice, professional office, golden lighting",
+        "senior_health":    "healthy elderly lifestyle, warm sunlight, nature background",
+        "storytelling":     "epic cinematic scene, dramatic lighting, movie poster style",
+        "default":          "dramatic cinematic background, dark gradient, professional",
+    }
+    style_hint = niche_style_map.get(niche, niche_style_map["default"])
+    flux_prompt = f"{title_text}, {style_hint}, 4K, ultra high quality, thumbnail"
+
+    bg_ready = _generate_flux_background(flux_prompt, tmp_bg)
+
+    if not bg_ready:
+        log.info("thumbnail.falling_back_to_frame")
+        bg_ready = extract_frame(video_path, tmp_bg)
+
+    if not bg_ready:
+        log.warning("thumbnail.no_background_available")
         return None
 
     try:
-        image = Image.open(temp_frame_path).convert("RGBA")
+        image = Image.open(tmp_bg).convert("RGBA").resize((1280, 720), Image.LANCZOS)
         width, height = image.size
-
         draw = ImageDraw.Draw(image)
-        overlay_color = (0, 0, 0, 128)
-        draw.rectangle([(0, 0), (width, height)], fill=overlay_color)
 
-        font_size = max(24, int(height / 8))
-        if os.path.exists(font_path):
-            font = ImageFont.truetype(font_path, font_size)
-        else:
-            print(f"Warning: Font file not found at {font_path}. Using default font.")
-            font = ImageFont.load_default()
+        # Semi-transparent dark gradient overlay for text legibility
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        ov_draw = ImageDraw.Draw(overlay)
+        for y in range(height // 2, height):
+            alpha = int(180 * (y - height // 2) / (height // 2))
+            ov_draw.line([(0, y), (width, y)], fill=(0, 0, 0, alpha))
+        image = Image.alpha_composite(image, overlay)
+        draw = ImageDraw.Draw(image)
+
+        # ── Text ────────────────────────────────────────────────────────────
+        font_size = max(48, int(height / 7))
+        font = _resolve_font(font_size)
 
         avg_char_width = max(10, font_size // 2)
-        wrap_width = max(10, int(width * 0.9 / avg_char_width))
-        wrapped_text = textwrap.fill((title_text or "").upper(), width=wrap_width)
+        wrap_width = max(10, int(width * 0.85 / avg_char_width))
+        wrapped = textwrap.fill((title_text or "").upper(), width=wrap_width)
 
-        text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
-        text_width = text_bbox[2] - text_bbox[0]
-        text_height = text_bbox[3] - text_bbox[1]
-        text_x = (width - text_width) / 2
-        text_y = (height - text_height) / 2
+        bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, align="center")
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = (width - tw) / 2
+        ty = height - th - 60  # bottom area
 
-        draw.multiline_text(
-            (text_x, text_y),
-            wrapped_text,
-            font=font,
-            fill=(255, 255, 255, 255),
-            align="center",
-        )
+        # Drop shadow
+        draw.multiline_text((tx + 4, ty + 4), wrapped, font=font,
+                            fill=(0, 0, 0, 200), align="center")
+        # Main text
+        draw.multiline_text((tx, ty), wrapped, font=font,
+                            fill=(255, 255, 255, 255), align="center")
 
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        image.convert("RGB").save(output_path, "JPEG", quality=90)
-        print(f"Thumbnail saved to {output_path}")
+        image.convert("RGB").save(output_path, "JPEG", quality=92)
+        log.info("thumbnail.saved", path=output_path)
         return output_path
+
     except Exception as e:
-        print(f"An error occurred during thumbnail creation: {e}")
+        log.error("thumbnail.creation_failed", error=str(e))
         return None
     finally:
-        if os.path.exists(temp_frame_path):
-            os.remove(temp_frame_path)
+        try:
+            Path(tmp_bg).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

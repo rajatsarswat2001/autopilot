@@ -22,18 +22,21 @@ class VisualScene(BaseModel):
     """Visual asset information for one scene."""
 
     scene_id: int = Field(..., ge=1)
-    asset_path: str = Field(..., description="Absolute path to video clip or image file")
-    asset_type: Literal["video_clip", "image", "placeholder"]
-    source: Literal["pexels", "sdxl_nim", "sdxl_local", "replicate", "placeholder"]
+    asset_path_A: str = Field(..., description="Absolute path to first video clip or image file")
+    asset_path_B: str = Field(..., description="Absolute path to second video clip or image file")
+    asset_type_A: Literal["video_clip", "image", "placeholder"]
+    asset_type_B: Literal["video_clip", "image", "placeholder"]
+    source_A: Literal["pexels", "pixabay", "pollinations", "wan21", "placeholder"]
+    source_B: Literal["pexels", "pixabay", "pollinations", "wan21", "placeholder"]
     width: int = 1920
     height: int = 1080
     duration_s: Optional[float] = None  # None for images; duration from timing manifest
-    pexels_id: Optional[str] = None
-    sdxl_prompt: Optional[str] = None
-
+    
     # Ken Burns config for static images
-    needs_ken_burns: bool = True
-    motion_direction: Optional[Literal["zoom_in", "zoom_out", "pan_left", "pan_right"]] = None
+    needs_ken_burns_A: bool = True
+    needs_ken_burns_B: bool = True
+    motion_direction_A: Optional[Literal["zoom_in", "zoom_out", "pan_left", "pan_right"]] = None
+    motion_direction_B: Optional[Literal["zoom_in", "zoom_out", "pan_left", "pan_right"]] = None
 
 
 class VisualManifest(BaseModel):
@@ -50,12 +53,12 @@ class VisualManifest(BaseModel):
 
     @property
     def pexels_scene_count(self) -> int:
-        return sum(1 for s in self.scenes if s.source == "pexels")
+        return sum(1 for s in self.scenes if s.source_A == "pexels" or s.source_B == "pexels")
 
     @property
     def generated_scene_count(self) -> int:
-        return sum(1 for s in self.scenes if s.source in ("sdxl_nim", "sdxl_local", "replicate"))
+        return sum(1 for s in self.scenes if s.source_A in ("pollinations", "sdxl_nim", "sdxl_local") or s.source_B in ("pollinations", "sdxl_nim", "sdxl_local"))
 
     @property
     def placeholder_scene_count(self) -> int:
-        return sum(1 for s in self.scenes if s.source == "placeholder")
+        return sum(1 for s in self.scenes if s.source_A == "placeholder" or s.source_B == "placeholder")

@@ -59,12 +59,14 @@ def _synthesise_scene(
     Synthesise TTS for a single scene. Thread-safe for all tiers.
     Returns (AudioScene, updated_scene_dict).
     """
-    scene_id  = scene["scene_id"]
-    narration = scene.get("narration", "")
-    emotion   = scene.get("emotion_exaggeration", 0.5)
-    out_path  = output_dir / f"{video_id}_scene_{scene_id:03d}.wav"
+    scene_id     = scene["scene_id"]
+    narration    = scene.get("narration", "")
+    emotion      = scene.get("emotion_exaggeration", 0.5)
+    emotion_tone = scene.get("emotional_tone", None)   # from script_agent
+    out_path     = output_dir / f"{video_id}_scene_{scene_id:03d}.wav"
 
-    log.info("audio_agent.synthesising", scene_id=scene_id, chars=len(narration))
+    log.info("audio_agent.synthesising", scene_id=scene_id,
+             chars=len(narration), tone=emotion_tone)
 
     tts = TTSChain()
     try:
@@ -72,6 +74,7 @@ def _synthesise_scene(
             text=narration,
             output_path=str(out_path),
             emotion_exaggeration=emotion,
+            emotion_tone=emotion_tone,   # drives Chatterbox exaggeration per-scene
         )
     except Exception as e:
         log.error("audio_agent.tts_chain_fatal", scene_id=scene_id, error=str(e))
@@ -93,7 +96,8 @@ def _synthesise_scene(
     updated_scene = {
         **scene,
         "audio_path":      str(out_path),
-        "duration_hint_s": duration,
+        "duration_s":      duration,      # used by caption_tools
+        "duration_hint_s": duration,      # backward compat
     }
     return audio_scene, updated_scene
 

@@ -41,8 +41,9 @@ SCRATCH_DIR     = Path(os.getenv("SCRATCH_DIR",  "outputs/video/scratch")).resol
 # Per-clip mux (video + audio)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: float) -> str:
-    """Combine one video clip with its voiceover WAV."""
+def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: float, width: int = 1920, height: int = 1080) -> str:
+    """Combine one video clip with its voiceover WAV, scaling and padding to target resolution."""
+    vf_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
     subprocess.run(
         [
             "ffmpeg", "-y",
@@ -50,6 +51,7 @@ def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: f
             "-i",  audio_path,
             "-map", "0:v:0",
             "-map", "1:a:0",
+            "-vf",  vf_filter,
             "-t",   str(duration_s),
             "-c:v", "libx264",
             "-preset", FFMPEG_PRESET,
@@ -117,7 +119,7 @@ def render_timeline(plan: RenderPlan, output_path: str | None = None,
         mux_out = str(SCRATCH_DIR / f"muxed_{clip.scene_id:03d}.mp4")
         log.info("render.muxing", scene_id=clip.scene_id)
         try:
-            _mux_clip(clip.visual_path, clip.audio_path, mux_out, clip.duration_s)
+            _mux_clip(clip.visual_path, clip.audio_path, mux_out, clip.duration_s, plan.width, plan.height)
             muxed_clips.append(mux_out)
         except subprocess.CalledProcessError as e:
             log.error("render.mux_failed", scene_id=clip.scene_id,
@@ -172,7 +174,8 @@ def render_timeline(plan: RenderPlan, output_path: str | None = None,
                 f"[1:a]volume={vol},"
                 f"afade=t=in:st=0:d={fade_in},"
                 f"afade=t=out:st={fade_out_st:.1f}:d={fade_out}[music];"
-                f"[0:a][music]amix=inputs=2:duration=first[aout]",
+                f"[music][0:a]sidechaincompress=threshold=0.03:ratio=4:attack=5:release=50[ducked_music];"
+                f"[0:a][ducked_music]amix=inputs=2:duration=first[aout]",
                 "-map", "0:v",
                 "-map", "[aout]",
                 "-t", str(total_dur),

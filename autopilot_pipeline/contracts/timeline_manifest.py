@@ -65,13 +65,17 @@ class TimelineClip(BaseModel):
     end_s: float
     duration_s: float              # = end_s - start_s
 
-    # Visual track
-    visual_path: str
-    visual_type: Literal["video_clip", "image"]
+    # Visual track A/B split
+    visual_path_A: str
+    visual_path_B: str
+    visual_type_A: Literal["video_clip", "image", "placeholder"]
+    visual_type_B: Literal["video_clip", "image", "placeholder"]
     visual_width: int = 1920
     visual_height: int = 1080
-    ken_burns: bool = False        # True for static images
-    motion_direction: Optional[Literal["zoom_in", "zoom_out", "pan_left", "pan_right"]] = None
+    ken_burns_A: bool = False
+    ken_burns_B: bool = False
+    motion_direction_A: Optional[Literal["zoom_in", "zoom_out", "pan_left", "pan_right"]] = None
+    motion_direction_B: Optional[Literal["zoom_in", "zoom_out", "pan_left", "pan_right"]] = None
 
     # Audio track
     audio_path: str
@@ -136,15 +140,22 @@ class TimelineManifest(BaseModel):
                     start_s=audio_scene.start_s,
                     end_s=audio_scene.end_s,
                     duration_s=audio_scene.duration_s,
-                    visual_path=vis_scene.asset_path,
-                    visual_type="video_clip" if vis_scene.asset_type == "video_clip" else "image",
+                    visual_path_A=vis_scene.asset_path_A,
+                    visual_path_B=vis_scene.asset_path_B,
+                    visual_type_A="video_clip" if vis_scene.asset_type_A == "video_clip" else "image",
+                    visual_type_B="video_clip" if vis_scene.asset_type_B == "video_clip" else "image",
                     visual_width=vis_scene.width,
                     visual_height=vis_scene.height,
-                    ken_burns=(
-                        vis_scene.needs_ken_burns
-                        and vis_scene.asset_type in ("image", "placeholder")
+                    ken_burns_A=(
+                        vis_scene.needs_ken_burns_A
+                        and vis_scene.asset_type_A in ("image", "placeholder")
                     ),
-                    motion_direction=vis_scene.motion_direction,
+                    ken_burns_B=(
+                        vis_scene.needs_ken_burns_B
+                        and vis_scene.asset_type_B in ("image", "placeholder")
+                    ),
+                    motion_direction_A=vis_scene.motion_direction_A,
+                    motion_direction_B=vis_scene.motion_direction_B,
                     audio_path=audio_scene.audio_path,
                 )
             )

@@ -29,6 +29,7 @@ from renderer.timeline_compiler import compile_timeline
 from renderer.ffmpeg_builder import render_timeline
 from renderer.thumbnail_generator import create_thumbnail
 from tools.caption_tools import generate_captions
+from tools.music_tools import generate_background_music, get_dominant_mood
 from tools.ffmpeg_tools import (
     measure_video_duration,
     get_video_resolution,
@@ -39,7 +40,6 @@ from workflows.pipeline_state import AgentError, PipelineState
 log = structlog.get_logger(__name__)
 
 OUTPUT_DIR   = Path(os.getenv("VIDEO_OUTPUT_DIR",  "outputs/video")).resolve()
-MUSIC_TRACKS = list(Path("data/assets/music").glob("*.mp3")) if Path("data/assets/music").exists() else []
 
 QA_MIN_DURATION_S    = 30.0     # minimum acceptable video length
 QA_MAX_DURATION_SKEW = 0.15     # 15% tolerance vs. timing manifest total
@@ -124,15 +124,24 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
         visual=visual,
     )
 
-    # Add background music if available
-    if MUSIC_TRACKS:
-        import random
+    # Generate background music using ACE-Step 1.5 or fallback track
+    mood = get_dominant_mood(manifest_dict)
+    video_id_for_music = video_id
+    music_path = generate_background_music(
+        mood=mood,
+        duration_s=timeline.total_duration_s + 5.0,  # slight overshoot, FFmpeg trims
+        video_id=video_id_for_music,
+    )
+    if music_path:
         timeline.music_track = MusicTrack(
-            path=str(random.choice(MUSIC_TRACKS)),
+            path=music_path,
             volume=0.10,
             fade_in_s=2.0,
             fade_out_s=4.0,
         )
+        log.info("assembly_agent.music_ready", path=music_path, mood=mood)
+    else:
+        log.warning("assembly_agent.music_skipped")
 
     log.info("assembly_agent.timeline_built",
              clips=len(timeline.clips), duration=timeline.total_duration_s)
@@ -168,7 +177,7 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
     thumb_path = str(OUTPUT_DIR / f"{video_id}_thumb.jpg")
     try:
         title = manifest_dict.get("title", "")
-        result = create_thumbnail(output_path, title, thumb_path)
+        result = create_thumbnail(output_path, title, thumb_path, niche=niche)
         if result is None:
             thumb_path = None
     except Exception as e:
