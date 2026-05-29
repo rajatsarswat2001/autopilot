@@ -6,10 +6,11 @@ Create YouTube thumbnails:
   2. Overlay bold title text using a downloaded Google Font (Oswald-Bold)
   3. Fallback: extract a video frame if FLUX call fails
 
-Font resolution order:
+Font resolution order (4-tier):
   1. THUMBNAIL_FONT_PATH env var (custom font)
-  2. ~/.cache/autopilot/Oswald-Bold.ttf  (auto-downloaded once)
-  3. PIL default (8px bitmap — last resort only)
+  2. ~/.cache/autopilot/Oswald-Bold.ttf  (auto-downloaded from Google Fonts)
+  3. /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf  (Kaggle/Ubuntu system)
+  4. PIL default bitmap (8px — absolute last resort, never fails)
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -38,7 +39,7 @@ _FONT_URL = (
 
 def _resolve_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Return the best available font at the requested size."""
-    # 1. User-specified
+    # 1. User-specified env var
     custom = os.getenv("THUMBNAIL_FONT_PATH", "")
     if custom and Path(custom).exists():
         try:
@@ -46,7 +47,7 @@ def _resolve_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         except Exception:
             pass
 
-    # 2. Cached Google Font
+    # 2. Cached Google Font (Oswald-Bold — downloads once)
     if not _FONT_CACHE_PATH.exists():
         try:
             _FONT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -61,7 +62,23 @@ def _resolve_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         except Exception:
             pass
 
-    # 3. PIL default (small but never fails)
+    # 3. System fonts — DejaVuSans-Bold (always present on Kaggle/Ubuntu)
+    _SYSTEM_FONTS = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",   # Kaggle / Ubuntu
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",                     # macOS
+        "C:/Windows/Fonts/arialbd.ttf",                            # Windows dev
+    ]
+    for sys_font in _SYSTEM_FONTS:
+        if Path(sys_font).exists():
+            try:
+                font = ImageFont.truetype(sys_font, size)
+                log.info("thumbnail.using_system_font", path=sys_font)
+                return font
+            except Exception:
+                pass
+
+    # 4. PIL default bitmap (absolute last resort — tiny but never fails)
     log.warning("thumbnail.using_default_font")
     return ImageFont.load_default()
 
