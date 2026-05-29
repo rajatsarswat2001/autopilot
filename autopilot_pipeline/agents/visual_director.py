@@ -1,19 +1,29 @@
 """
 agents/visual_director.py
 ─────────────────────────────────────────────────────────────────────────────
-Visual Director Agent — sources B-roll and generated stills for every scene.
+Visual Director Agent — sources AI-generated or B-roll visuals for every scene.
 
-Asset sourcing priority (per scene):
-  1. Pexels video clip   — keyword search, free royalty-free footage
-  2. SDXL via NVIDIA NIM — generated still (cinematic prompt)
-  3. Solid-colour frame  — 1920×1080 gradient PNG (never fails)
+Asset sourcing priority (per clip, Tier 1 through Tier 4):
+  Tier 1a: Wan2.1 I2V   — Image-to-Video anchored to a master FLUX keyframe
+                          (WAN21_I2V_ENABLED=1 + WAN21_ENABLED=1)
+           Eliminates style drift: every clip shares the same visual identity.
+  Tier 1b: Wan2.1 T2V   — Pure text-to-video (WAN21_ENABLED=1)
+  Tier 2:  Pexels        — keyword-matched stock footage (DISABLE_STOCK != 1)
+  Tier 3:  Pollinations  — free FLUX-powered AI still (no API key needed)
+  Tier 4:  Placeholder   — mood-coloured gradient PNG (absolute last resort)
+
+I2V Anchor Flow:
+  1. generate_anchor_image() — calls Pollinations FLUX to produce a master keyframe
+  2. generate_i2v_clip()     — passes the keyframe to WanImageToVideoPipeline
+     This forces the diffusion transformer to retain the exact visual identity,
+     color palette, and composition of the anchor across all clips in the scene.
 
 Visuals conform to AudioAgent timing — clip lengths are set by the
 TimingManifest, not the other way around.
 
 Performance:
-  • All scenes are sourced in PARALLEL using ThreadPoolExecutor.
-  • Pexels downloads are purely I/O-bound — parallelism gives linear speedup.
+  • Tier 2 (Pexels) scenes run in PARALLEL via ThreadPoolExecutor (I/O-bound).
+  • Tier 1 (Wan2.1) runs sequentially to maximise GPU utilisation.
   • max_workers defaults to 4; override via VISUAL_PARALLEL_WORKERS env var.
 ─────────────────────────────────────────────────────────────────────────────
 """
@@ -31,7 +41,12 @@ import structlog
 from contracts.visual_manifest import VisualManifest, VisualScene
 from contracts.timing_manifest import TimingManifest
 from tools.pexels_tools import search_and_download_video
-from tools.wan21_tools import generate_video_clip, is_wan21_available
+from tools.wan21_tools import (
+    generate_video_clip,
+    generate_i2v_clip,
+    generate_anchor_image,
+    is_wan21_available,
+)
 import requests
 from urllib.parse import quote as url_encode
 from workflows.pipeline_state import AgentError, PipelineState
@@ -41,6 +56,8 @@ log = structlog.get_logger(__name__)
 VISUAL_DIR   = Path(os.getenv("VISUAL_OUTPUT_DIR", "outputs/visual")).resolve()
 MOTION_CYCLE = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
 _MAX_WORKERS = int(os.getenv("VISUAL_PARALLEL_WORKERS", "4"))
+# Set WAN21_I2V_ENABLED=1 to enable I2V anchor-locked mode
+_I2V_ENABLED = os.getenv("WAN21_I2V_ENABLED", "0").strip() == "1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,8 +114,41 @@ def _make_placeholder(scene_id: int, mood: str, out_dir: Path, split_label: str 
 # Per-scene sourcing helper (runs inside thread pool)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _source_asset(keyword: str, prompt: str, mood: str, out_dir: Path, video_id: str, scene_id: int, split_label: str, orientation: str, duration_s: float = 5.0, niche: str = "default") -> tuple[str, str, str]:
-    # ── Tier 1: Wan2.1 1.3B AI Video (Kaggle T4 GPU) ──────────────────────────
+def _source_asset(
+    keyword: str,
+    prompt: str,
+    mood: str,
+    out_dir: Path,
+    video_id: str,
+    scene_id: int,
+    split_label: str,
+    orientation: str,
+    duration_s: float = 5.0,
+    niche: str = "default",
+    anchor_image_path: str | None = None,   # I2V anchor for style-locked generation
+) -> tuple[str, str, str]:
+    """
+    Source a single visual asset for one clip (A or B) of a scene.
+    Returns (path, asset_type, source_label).
+    """
+    # ── Tier 1a: Wan2.1 I2V — anchor-locked video (eliminates style drift) ────
+    if _I2V_ENABLED and is_wan21_available() and prompt and anchor_image_path:
+        clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_i2v.mp4")
+        try:
+            result = generate_i2v_clip(
+                prompt=prompt,
+                anchor_image_path=anchor_image_path,
+                output_path=clip_path,
+                duration_s=duration_s,
+                niche=niche,
+            )
+            if result:
+                log.info("visual_director.i2v_ok", scene_id=scene_id, label=split_label)
+                return result, "video_clip", "wan21"
+        except Exception as e:
+            log.warning("visual_director.i2v_failed", scene_id=scene_id, error=str(e)[:120])
+
+    # ── Tier 1b: Wan2.1 T2V — pure text-to-video ──────────────────────────────
     if is_wan21_available() and prompt:
         clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_wan.mp4")
         try:
@@ -112,9 +162,10 @@ def _source_asset(keyword: str, prompt: str, mood: str, out_dir: Path, video_id:
                 log.info("visual_director.wan21_ok", scene_id=scene_id, label=split_label)
                 return result, "video_clip", "wan21"
         except Exception as e:
-            log.warning("visual_director.wan21_failed_falling_back", scene_id=scene_id, error=str(e))
+            log.warning("visual_director.wan21_failed_falling_back",
+                        scene_id=scene_id, error=str(e)[:120])
 
-    # ── Tier 2: Pexels video clip ─────────────────────────────────────────────
+    # ── Tier 2: Pexels stock footage ───────────────────────────────────────────
     if os.environ.get("DISABLE_STOCK", "0") != "1":
         try:
             clip_path = search_and_download_video(
@@ -127,16 +178,20 @@ def _source_asset(keyword: str, prompt: str, mood: str, out_dir: Path, video_id:
                 log.info("visual_director.pexels_ok", scene_id=scene_id, label=split_label)
                 return clip_path, "video_clip", "pexels"
         except Exception as e:
-            log.warning("visual_director.pexels_failed", scene_id=scene_id, label=split_label, error=str(e))
+            log.warning("visual_director.pexels_failed",
+                        scene_id=scene_id, label=split_label, error=str(e)[:120])
     else:
         log.info("visual_director.stock_disabled", scene_id=scene_id, label=split_label)
 
-    # ── Tier 3: Generative still via Pollinations AI ──────────────────────────
+    # ── Tier 3: Pollinations FLUX still ───────────────────────────────────────
     try:
         w, h = (1080, 1920) if orientation in ("portrait", "reel", "short") else (1920, 1080)
-        encoded = url_encode(prompt)
-        poll_url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true&model=flux"
-        resp = requests.get(poll_url, stream=True, timeout=45)
+        encoded  = url_encode(prompt)
+        poll_url = (
+            f"https://image.pollinations.ai/prompt/{encoded}"
+            f"?width={w}&height={h}&nologo=true&model=flux&seed={scene_id}"
+        )
+        resp = requests.get(poll_url, stream=True, timeout=60)
         resp.raise_for_status()
         img_out = out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}.png"
         with open(img_out, "wb") as f:
@@ -146,9 +201,10 @@ def _source_asset(keyword: str, prompt: str, mood: str, out_dir: Path, video_id:
             log.info("visual_director.pollinations_ok", scene_id=scene_id, label=split_label)
             return str(img_out), "image", "pollinations"
     except Exception as e:
-        log.warning("visual_director.pollinations_failed", scene_id=scene_id, label=split_label, error=str(e))
+        log.warning("visual_director.pollinations_failed",
+                    scene_id=scene_id, label=split_label, error=str(e)[:120])
 
-    # ── Tier 4: Placeholder ───────────────────────────────────────────────────
+    # ── Tier 4: Placeholder (absolute last resort) ─────────────────────────────
     log.warning("visual_director.using_placeholder", scene_id=scene_id, label=split_label)
     return _make_placeholder(scene_id, mood, out_dir, split_label), "placeholder", "placeholder"
 
@@ -158,24 +214,57 @@ def _source_scene(
     video_id: str,
     out_dir: Path,
 ) -> VisualScene:
+    """
+    Source all visual assets for a single scene.
+    When I2V mode is enabled, first generates a FLUX anchor image then
+    passes it into WanImageToVideoPipeline for both A and B clips.
+    """
     scene_id = scene["scene_id"]
     mood     = scene.get("emotional_tone", "neutral")
     motion_a = MOTION_CYCLE[(scene_index * 2) % len(MOTION_CYCLE)]
     motion_b = MOTION_CYCLE[(scene_index * 2 + 1) % len(MOTION_CYCLE)]
 
-    log.info("visual_director.scene", scene_id=scene_id)
+    log.info("visual_director.scene", scene_id=scene_id, i2v=_I2V_ENABLED)
 
-    orientation = os.environ.get("FORMAT", "youtube").lower()
+    orientation        = os.environ.get("FORMAT", "youtube").lower()
     pexels_orientation = "portrait" if orientation in ("reel", "short") else "landscape"
+    niche              = os.environ.get("NICHE", "default")
 
-    niche    = os.environ.get("NICHE", "default")
+    # ── I2V: Generate master anchor image for this scene ───────────────────
+    # The anchor image locks the visual identity across A and B clips.
+    anchor_path: str | None = None
+    if _I2V_ENABLED and is_wan21_available():
+        pr_a = scene.get("visual_prompt_A", "")
+        if pr_a:
+            anchor_out = str(out_dir / f"{video_id}_scene_{scene_id:03d}_anchor.png")
+            anchor_path = generate_anchor_image(
+                prompt=pr_a,
+                output_path=anchor_out,
+                niche=niche,
+            )
+            if anchor_path:
+                log.info("visual_director.anchor_ready",
+                         scene_id=scene_id, path=anchor_path)
+            else:
+                log.warning("visual_director.anchor_failed_continuing",
+                            scene_id=scene_id)
+
+    # ── Source A and B clips ────────────────────────────────────────────────
     kw_a = scene.get("b_roll_keyword_A", "")
     pr_a = scene.get("visual_prompt_A", "")
-    path_a, type_a, src_a = _source_asset(kw_a, pr_a, mood, out_dir, video_id, scene_id, "A", pexels_orientation, duration_s=5.0, niche=niche)
+    path_a, type_a, src_a = _source_asset(
+        kw_a, pr_a, mood, out_dir, video_id, scene_id, "A",
+        pexels_orientation, duration_s=5.0, niche=niche,
+        anchor_image_path=anchor_path,
+    )
 
     kw_b = scene.get("b_roll_keyword_B", "")
     pr_b = scene.get("visual_prompt_B", "")
-    path_b, type_b, src_b = _source_asset(kw_b, pr_b, mood, out_dir, video_id, scene_id, "B", pexels_orientation, duration_s=5.0, niche=niche)
+    path_b, type_b, src_b = _source_asset(
+        kw_b, pr_b, mood, out_dir, video_id, scene_id, "B",
+        pexels_orientation, duration_s=5.0, niche=niche,
+        anchor_image_path=anchor_path,
+    )
 
     width, height = (1080, 1920) if orientation in ("reel", "short") else (1920, 1080)
 

@@ -35,6 +35,10 @@ pyttsx3>=2.90                    # Tier 5: offline CPU fallback
 
 # ── Image / Video processing ──────────────────────────────────────────────────
 Pillow>=10.3.0                    # thumbnail generation, placeholder frames
+imageio>=2.34.0                   # frame I/O (used by Wan2.1 clip exporter)
+imageio-ffmpeg>=0.5.1
+# whisperx>=3.1.0                 # optional: frame-perfect caption alignment
+#   pip install git+https://github.com/m-bain/whisperX.git
 # NOTE: torch, torchaudio, diffusers installed via requirements-gpu.txt
 
 # ── Vector store / RAG ────────────────────────────────────────────────────────
