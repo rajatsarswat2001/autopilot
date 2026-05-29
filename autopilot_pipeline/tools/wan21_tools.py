@@ -175,8 +175,7 @@ def _load_pipeline_impl():
     for candidate in candidates:
         try:
             log.info("wan21.trying_model_id", model_id=candidate)
-            # Probe VAE only to confirm the repo is accessible
-            AutoencoderKLWan.from_pretrained(
+            vae = AutoencoderKLWan.from_pretrained(
                 candidate, subfolder="vae", torch_dtype=torch.float32
             )
             resolved_id = candidate
@@ -195,31 +194,25 @@ def _load_pipeline_impl():
     log.info("wan21.loading_model", model_id=resolved_id, num_gpus=num_gpus)
     log.info("wan21.note", msg="First load downloads ~28 GB weights — one-time only")
 
-    if num_gpus >= 2:
-        # ── Dual-GPU path: spread layers across both T4s via device_map ──────────
-        # Combined VRAM = 2 × 15.6 GB = 31.2 GB, which fits the full model.
-        # device_map="balanced" distributes transformer shards evenly;
-        # no enable_model_cpu_offload() call needed (and would conflict).
-        log.info("wan21.loading_strategy", gpus=num_gpus, strategy="device_map=balanced",
-                 note="Wan2.1 shards split across cuda:0 + cuda:1 automatically")
-        _PIPE = WanPipeline.from_pretrained(
-            resolved_id,
-            torch_dtype=torch.bfloat16,
-            device_map="balanced",
-        )
-    else:
-        # ── Single-GPU path: cpu_offload pages weights on demand ──────────────────
-        log.info("wan21.loading_strategy", gpus=num_gpus, strategy="cpu_offload",
-                 note="Single T4 — cpu_offload prevents OOM")
-        vae = AutoencoderKLWan.from_pretrained(
-            resolved_id, subfolder="vae", torch_dtype=torch.float32
-        )
-        _PIPE = WanPipeline.from_pretrained(
-            resolved_id,
-            vae=vae,
-            torch_dtype=torch.bfloat16,
-        )
-        _PIPE.enable_model_cpu_offload(gpu_id=0)
+    # Load VAE in float32 for decoding quality; transformer in bfloat16
+    _PIPE = WanPipeline.from_pretrained(
+        resolved_id,
+        vae=vae,
+        torch_dtype=torch.bfloat16,
+    )
+
+    # enable_model_cpu_offload keeps the 22 GB UMT5-XXL text encoder in system RAM
+    # and swaps it to the target GPU only for the encode step (~2 s), then moves it
+    # back. Peak active VRAM stays ~8-9 GB — well within the T4's 15.6 GB.
+    #
+    # gpu_id controls WHICH GPU receives the model:
+    #   2-GPU Kaggle:  gpu_id=1  → Wan2.1 on cuda:1, Chatterbox stays on cuda:0
+    #   1-GPU / other: gpu_id=0  → single card, audio runs sequentially
+    gpu_id = 1 if num_gpus >= 2 else 0
+    log.info("wan21.loading_strategy", gpus=num_gpus, strategy="cpu_offload",
+             gpu_id=gpu_id,
+             note="22GB text encoder paged to system RAM; peak VRAM ~8-9 GB")
+    _PIPE.enable_model_cpu_offload(gpu_id=gpu_id)
 
     if hasattr(_PIPE, "enable_vae_slicing"):
         try:
@@ -278,24 +271,17 @@ def _load_i2v_pipeline_impl():
         from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
         log.info("wan21.i2v.loading", model_id=_I2V_MODEL_ID, num_gpus=num_gpus)
-
-        if num_gpus >= 2:
-            # Dual-GPU: spread across both T4s — same strategy as T2V
-            _I2V_PIPE = WanImageToVideoPipeline.from_pretrained(
-                _I2V_MODEL_ID,
-                torch_dtype=torch.bfloat16,
-                device_map="balanced",
-            )
-        else:
-            vae = AutoencoderKLWan.from_pretrained(
-                _I2V_MODEL_ID, subfolder="vae", torch_dtype=torch.float32
-            )
-            _I2V_PIPE = WanImageToVideoPipeline.from_pretrained(
-                _I2V_MODEL_ID,
-                vae=vae,
-                torch_dtype=torch.bfloat16,
-            )
-            _I2V_PIPE.enable_model_cpu_offload(gpu_id=0)
+        vae = AutoencoderKLWan.from_pretrained(
+            _I2V_MODEL_ID, subfolder="vae", torch_dtype=torch.float32
+        )
+        _I2V_PIPE = WanImageToVideoPipeline.from_pretrained(
+            _I2V_MODEL_ID,
+            vae=vae,
+            torch_dtype=torch.bfloat16,
+        )
+        # Mirror T2V strategy: gpu_id=1 on 2-GPU Kaggle, gpu_id=0 otherwise
+        gpu_id = 1 if num_gpus >= 2 else 0
+        _I2V_PIPE.enable_model_cpu_offload(gpu_id=gpu_id)
 
         if hasattr(_I2V_PIPE, "enable_vae_slicing"):
             try:
