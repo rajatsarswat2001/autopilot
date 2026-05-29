@@ -562,8 +562,8 @@ def generate_video_clip(
     niche: str = "default",
     num_frames: int = 0,
     fps: int = 16,
-    width: int = 832,
-    height: int = 480,
+    width: int = 480,   # reduced from 832 — keeps attn matrix inside T4 VRAM
+    height: int = 480,  # square crop; assembled into 1080p via ffmpeg scale+pad
     num_inference_steps: int = 20,
     guidance_scale: float = 5.0,
 ) -> Optional[str]:
@@ -579,7 +579,10 @@ def generate_video_clip(
 
     if num_frames == 0:
         raw = int(duration_s * fps)
-        num_frames = max(17, ((raw // 4) * 4) + 1)
+        # Cap at 33 frames (≈2s at 16fps) — keeps attention matrix inside T4 VRAM.
+        # At 480x480, 33 frames requires ~3.5GB activation; safely fits in 9.5GB free VRAM.
+        # (Previously 81 frames @ 832x480 required 47.98 GB → OOM crash)
+        num_frames = max(17, min(33, ((raw // 4) * 4) + 1))
 
     log.info("wan21.generating",
              frames=num_frames, fps=fps, size=f"{width}x{height}",
