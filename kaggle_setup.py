@@ -242,7 +242,11 @@ CHECK_MODULES = [
         + (" | GPUs: " + str(m.cuda.device_count()) if m.cuda.is_available() else "")
         + (" | " + m.cuda.get_device_name(0) if m.cuda.is_available() else "")
     )),
-    ("diffusers",     "diffusers",      _check_wan),
+    ("diffusers",     "diffusers",      lambda m: (
+        f"OK  (diffusers {m.__version__}"
+        + (", LTXPipeline ✓" if hasattr(m, "LTXPipeline") else ", LTXPipeline ✗ — upgrade diffusers!")
+        + ")"
+    )),
     ("transformers",  "transformers",   lambda m: m.__version__),
     ("accelerate",    "accelerate",     lambda m: m.__version__),
     ("chatterbox",    "chatterbox.tts", lambda m: "OK"),

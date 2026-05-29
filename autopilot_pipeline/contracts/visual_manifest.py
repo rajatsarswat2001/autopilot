@@ -28,8 +28,8 @@ class VisualScene(BaseModel):
     asset_path_B: str = Field(..., description="Absolute path to second video clip or image file")
     asset_type_A: Literal["video_clip", "image", "placeholder"]
     asset_type_B: Literal["video_clip", "image", "placeholder"]
-    source_A: Literal["wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "placeholder"]
-    source_B: Literal["wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "placeholder"]
+    source_A: Literal["ltx", "wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "placeholder"]
+    source_B: Literal["ltx", "wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "placeholder"]
     width: int = 1920
     height: int = 1080
     duration_s: Optional[float] = None  # None for images; duration from timing manifest
@@ -59,7 +59,7 @@ class VisualManifest(BaseModel):
 
     @property
     def generated_scene_count(self) -> int:
-        _generated = {"wan21", "pollinations", "sdxl_nim", "sdxl_local", "replicate"}
+        _generated = {"ltx", "wan21", "pollinations", "sdxl_nim", "sdxl_local", "replicate"}
         return sum(1 for s in self.scenes if s.source_A in _generated or s.source_B in _generated)
 
     @property

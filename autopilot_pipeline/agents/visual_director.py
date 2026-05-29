@@ -41,9 +41,13 @@ import structlog
 from contracts.visual_manifest import VisualManifest, VisualScene
 from contracts.timing_manifest import TimingManifest
 from tools.pexels_tools import search_and_download_video
+from tools.ltx_tools import (
+    generate_ltx_clip,
+    is_ltx_available,
+)
 from tools.wan21_tools import (
-    generate_video_clip,
-    generate_i2v_clip,
+    generate_video_clip  as wan21_generate_clip,
+    generate_i2v_clip    as wan21_generate_i2v,
     generate_anchor_image,
     is_wan21_available,
 )
@@ -131,11 +135,28 @@ def _source_asset(
     Source a single visual asset for one clip (A or B) of a scene.
     Returns (path, asset_type, source_label).
     """
-    # ── Tier 1a: Wan2.1 I2V — anchor-locked video (eliminates style drift) ────
+    # ── Tier 1: LTX-Video T2V — 704x480, ~15s/clip on T4, Apache 2.0 ─────────
+    if is_ltx_available() and prompt:
+        clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_ltx.mp4")
+        try:
+            result = generate_ltx_clip(
+                prompt=prompt,
+                output_path=clip_path,
+                duration_s=duration_s,
+                niche=niche,
+            )
+            if result:
+                log.info("visual_director.ltx_ok", scene_id=scene_id, label=split_label)
+                return result, "video_clip", "ltx"
+        except Exception as e:
+            log.warning("visual_director.ltx_failed_falling_back",
+                        scene_id=scene_id, error=str(e)[:120])
+
+    # ── Tier 2: Wan2.1 I2V — anchor-locked (style-consistent, fallback) ───────
     if _I2V_ENABLED and is_wan21_available() and prompt and anchor_image_path:
         clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_i2v.mp4")
         try:
-            result = generate_i2v_clip(
+            result = wan21_generate_i2v(
                 prompt=prompt,
                 anchor_image_path=anchor_image_path,
                 output_path=clip_path,
@@ -148,11 +169,11 @@ def _source_asset(
         except Exception as e:
             log.warning("visual_director.i2v_failed", scene_id=scene_id, error=str(e)[:120])
 
-    # ── Tier 1b: Wan2.1 T2V — pure text-to-video ──────────────────────────────
+    # ── Tier 3: Wan2.1 T2V — pure text-to-video (secondary fallback) ──────────
     if is_wan21_available() and prompt:
         clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_wan.mp4")
         try:
-            result = generate_video_clip(
+            result = wan21_generate_clip(
                 prompt=prompt,
                 output_path=clip_path,
                 duration_s=duration_s,
@@ -380,8 +401,13 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
 
     visual_manifest = VisualManifest(video_id=video_id, scenes=visual_scenes)
 
+    ltx_count = sum(
+        1 for s in visual_scenes
+        if getattr(s, 'source_A', '') == 'ltx' or getattr(s, 'source_B', '') == 'ltx'
+    )
     log.info(
         "visual_director.done",
+        ltx=ltx_count,
         pexels=visual_manifest.pexels_scene_count,
         generated=visual_manifest.generated_scene_count,
         placeholders=visual_manifest.placeholder_scene_count,

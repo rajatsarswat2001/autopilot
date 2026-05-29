@@ -227,26 +227,43 @@ def create_ken_burns_effect(
     """
     total_frames = int(duration_s * frame_rate)
 
+    # Cinematic Ken Burns effects — faster motion, more variety
+    # zoom speed 0.0015/frame = noticeably dynamic on a 5s clip at 30fps
     effects_dict = {
-        "zoom_in": {
-            "z": "min(zoom+0.001,1.5)",
+        "zoom_in": {                # smooth push-in from centre
+            "z": "min(zoom+0.0015,1.6)",
             "x": "iw/2-(iw/zoom/2)",
             "y": "ih/2-(ih/zoom/2)",
         },
-        "pan_left": {
+        "zoom_out": {               # pull back / reveal
+            "z": "max(1.0,1.6-0.0015*on)",
+            "x": "iw/2-(iw/zoom/2)",
+            "y": "ih/2-(ih/zoom/2)",
+        },
+        "pan_left": {               # drift left with slight zoom
+            "z": "1.25",
+            "x": "min(on*iw/160, iw-iw/zoom)",
+            "y": "ih/2-(ih/zoom/2)",
+        },
+        "pan_right": {              # drift right with slight zoom
+            "z": "1.25",
+            "x": "max(iw-iw/zoom-on*iw/160, 0)",
+            "y": "ih/2-(ih/zoom/2)",
+        },
+        "diagonal_pan": {           # cinematic diagonal drift (top-left → bottom-right)
             "z": "1.2",
             "x": "min(on*iw/200, iw-iw/zoom)",
             "y": "min(on*ih/200, ih-ih/zoom)",
         },
-        "pan_right": {
-            "z": "1.2",
-            "x": "max(iw-iw/zoom-on*iw/200, 0)",
-            "y": "max(ih-ih/zoom-on*ih/200, 0)",
-        },
-        "zoom_out": {
-            "z": "max(1.0,1.5-0.001*on)",
+        "slow_push": {              # very slow zoom-in (documentary feel)
+            "z": "min(zoom+0.0008,1.3)",
             "x": "iw/2-(iw/zoom/2)",
             "y": "ih/2-(ih/zoom/2)",
+        },
+        "pull_back": {              # zoom out + pan up (dramatic reveal)
+            "z": "max(1.0,1.4-0.0012*on)",
+            "x": "iw/2-(iw/zoom/2)",
+            "y": "max(ih-ih/zoom-on*ih/300, 0)",
         },
     }
 
