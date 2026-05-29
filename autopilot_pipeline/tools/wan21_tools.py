@@ -214,14 +214,53 @@ def _load_pipeline_impl():
              note="22GB text encoder paged to system RAM; peak VRAM ~8-9 GB")
     _PIPE.enable_model_cpu_offload(gpu_id=gpu_id)
 
+    # Configure PyTorch SDPA (Scaled Dot Product Attention) backends to enforce
+    # memory-efficient attention on Tesla T4 GPUs (SM 7.5).
+    # Disabling math/eager attention prevents PyTorch from falling back to the naive
+    # O(N²) attention matrix that allocates 48 GB and crashes inference.
+    try:
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+        log.info("wan21.sdpa_backends_configured", flash=False, mem_efficient=True, math=False)
+    except Exception as e:
+        log.warning("wan21.sdpa_backends_failed", error=str(e))
+
     if hasattr(_PIPE, "enable_vae_slicing"):
         try:
             _PIPE.enable_vae_slicing()
+            log.info("wan21.vae_slicing_enabled")
         except Exception as e:
             log.warning("wan21.enable_vae_slicing_failed", error=str(e))
-    if hasattr(_PIPE, "enable_attention_slicing"):
+
+    if hasattr(_PIPE, "enable_vae_tiling"):
         try:
-            _PIPE.enable_attention_slicing()
+            _PIPE.enable_vae_tiling()
+            log.info("wan21.vae_tiling_enabled")
+        except Exception as e:
+            log.warning("wan21.enable_vae_tiling_failed", error=str(e))
+
+    # xformers memory-efficient attention: prevents the 48 GB N² DiT attention
+    # matrix explosion that crashes PyTorch eager attention on T4 GPUs.
+    # If xformers is not available, we fall back to attention slicing WITH slice_size=1
+    # (the default slice_size="auto" is too large and still OOMs on T4).
+    xformers_active = False
+    if hasattr(_PIPE, "enable_xformers_memory_efficient_attention"):
+        try:
+            _PIPE.enable_xformers_memory_efficient_attention()
+            xformers_active = True
+            log.info("wan21.xformers_enabled",
+                     note="N^2 attention matrix replaced with O(N) memory-efficient kernels")
+        except Exception as e:
+            log.warning("wan21.xformers_failed", error=str(e)[:120])
+
+    if not xformers_active and hasattr(_PIPE, "enable_attention_slicing"):
+        try:
+            # Tell the pipeline to process 1 attention head at a time (slice_size=1)
+            # This drops the peak memory for 81 frames to ~2.15 GB per slice.
+            _PIPE.enable_attention_slicing(1)
+            log.info("wan21.attention_slicing_enabled", slice_size=1,
+                     note="Falling back to slice_size=1 since xformers is not available")
         except Exception as e:
             log.warning("wan21.enable_attention_slicing_failed", error=str(e))
 
@@ -283,16 +322,45 @@ def _load_i2v_pipeline_impl():
         gpu_id = 1 if num_gpus >= 2 else 0
         _I2V_PIPE.enable_model_cpu_offload(gpu_id=gpu_id)
 
+        # Configure PyTorch SDPA backends
+        try:
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            torch.backends.cuda.enable_math_sdp(False)
+            log.info("wan21.i2v.sdpa_backends_configured", flash=False, mem_efficient=True, math=False)
+        except Exception as e:
+            log.warning("wan21.i2v.sdpa_backends_failed", error=str(e))
+
         if hasattr(_I2V_PIPE, "enable_vae_slicing"):
             try:
                 _I2V_PIPE.enable_vae_slicing()
+                log.info("wan21.i2v.vae_slicing_enabled")
             except Exception as e:
                 log.warning("wan21.i2v.enable_vae_slicing_failed", error=str(e))
-        if hasattr(_I2V_PIPE, "enable_attention_slicing"):
+
+        if hasattr(_I2V_PIPE, "enable_vae_tiling"):
             try:
-                _I2V_PIPE.enable_attention_slicing()
+                _I2V_PIPE.enable_vae_tiling()
+                log.info("wan21.i2v.vae_tiling_enabled")
             except Exception as e:
-                log.warning("wan21.i2v.enable_attention_slicing_failed", error=str(e))
+                log.warning("wan21.i2v.enable_vae_tiling_failed", error=str(e))
+
+        # xformers memory-efficient attention or fallback to slicing
+        i2v_xformers_active = False
+        if hasattr(_I2V_PIPE, "enable_xformers_memory_efficient_attention"):
+            try:
+                _I2V_PIPE.enable_xformers_memory_efficient_attention()
+                i2v_xformers_active = True
+                log.info("wan21.i2v.xformers_enabled")
+            except Exception as e:
+                log.warning("wan21.i2v.xformers_failed", error=str(e)[:120])
+
+        if not i2v_xformers_active and hasattr(_I2V_PIPE, "enable_attention_slicing"):
+            try:
+                _I2V_PIPE.enable_attention_slicing(1)
+                log.info("wan21.i2v.attention_slicing_enabled", slice_size=1)
+            except Exception as e:
+                log.warning("wan21.i2v.attention_slicing_failed", error=str(e))
         _I2V_PIPE.scheduler = UniPCMultistepScheduler.from_config(
             _I2V_PIPE.scheduler.config, flow_shift=3.0
         )
