@@ -105,10 +105,22 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
     )
 
     import torchaudio
-    torchaudio.save(output_path, wav, model.sr)
+    import tempfile
+    import subprocess
+    from pathlib import Path
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    torchaudio.save(tmp_path, wav, model.sr)
+
+    # Slow down voice slightly (user request: atempo=0.92)
+    subprocess.run([
+        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.92", output_path
+    ], check=True, capture_output=True)
+    Path(tmp_path).unlink(missing_ok=True)
 
     log.debug("tts.chatterbox_ok", chars=len(text), path=output_path,
-              exaggeration=emotion_exaggeration)
+              exaggeration=emotion_exaggeration, slowed=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

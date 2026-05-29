@@ -149,7 +149,8 @@ def create_thumbnail(
     tmp_bg = str(Path(output_path).with_name(f"thumb_bg_{uuid.uuid4().hex}.jpg"))
 
     # ── Background ──────────────────────────────────────────────────────────
-    # Build a cinematic FLUX prompt from the title
+    # Build a cinematic FLUX prompt from the title, explicitly forbidding text
+    # so the Python PIL text overlay remains legible.
     niche_style_map = {
         "personal_finance": "dramatic financial charts, city skyline at dusk, cinematic lighting",
         "saas_tools":       "futuristic tech interface, dark UI glow, cyberpunk aesthetic",
@@ -159,7 +160,7 @@ def create_thumbnail(
         "default":          "dramatic cinematic background, dark gradient, professional",
     }
     style_hint = niche_style_map.get(niche, niche_style_map["default"])
-    flux_prompt = f"{title_text}, {style_hint}, 4K, ultra high quality, thumbnail"
+    flux_prompt = f"Background image for '{title_text}', {style_hint}, textless, no text, empty space in center, 4K, ultra high quality, clean composition"
 
     bg_ready = _generate_flux_background(flux_prompt, tmp_bg)
 
