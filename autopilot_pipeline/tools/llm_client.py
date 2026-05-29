@@ -199,10 +199,14 @@ def call_llm(
                         max_tokens=max_tokens,
                     )
                 else:
+                    # max_retries=0: disable SDK auto-retry so our key-rotation
+                    # loop is the only retry mechanism. Without this, each key
+                    # burns 3x the quota on 429 errors before we rotate.
                     client = OpenAI(
                         base_url=base_url,
                         api_key=key,
-                    ) if base_url else OpenAI(api_key=key)
+                        max_retries=0,
+                    ) if base_url else OpenAI(api_key=key, max_retries=0)
 
                     resp = client.chat.completions.create(
                         model=model,
@@ -293,8 +297,8 @@ def get_llm_client() -> tuple[OpenAI, str]:
         key      = keys[0]
         log.info("llm.client_selected", provider=name, model=model)
         client = OpenAI(
-            base_url=base_url, api_key=key
-        ) if base_url else OpenAI(api_key=key)
+            base_url=base_url, api_key=key, max_retries=0,
+        ) if base_url else OpenAI(api_key=key, max_retries=0)
         return client, model
 
     log.warning("llm.all_providers_empty_using_ollama")
