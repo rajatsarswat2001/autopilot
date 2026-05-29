@@ -232,25 +232,30 @@ def _source_asset(
                         scene_id=scene_id, label=split_label, error=str(e)[:120])
 
     # ── Tier 4: Pollinations FLUX still (fallback if HF_TOKEN not set / 402) ──
-    try:
-        w, h = (1080, 1920) if orientation in ("portrait", "reel", "short") else (1920, 1080)
-        encoded  = url_encode(prompt)
-        poll_url = (
-            f"https://image.pollinations.ai/prompt/{encoded}"
-            f"?width={w}&height={h}&nologo=true&model=flux&seed={scene_id}"
-        )
-        resp = requests.get(poll_url, stream=True, timeout=60)
-        resp.raise_for_status()
-        img_out = out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}.png"
-        with open(img_out, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-        if img_out.stat().st_size > 10_000:
-            log.info("visual_director.pollinations_ok", scene_id=scene_id, label=split_label)
-            return str(img_out), "image", "pollinations"
-    except Exception as e:
-        log.warning("visual_director.pollinations_failed",
-                    scene_id=scene_id, label=split_label, error=str(e)[:120])
+    import time
+    _POLL_ATTEMPTS = 3
+    for _attempt in range(1, _POLL_ATTEMPTS + 1):
+        try:
+            w, h = (1080, 1920) if orientation in ("portrait", "reel", "short") else (1920, 1080)
+            encoded  = url_encode(prompt)
+            poll_url = (
+                f"https://image.pollinations.ai/prompt/{encoded}"
+                f"?width={w}&height={h}&nologo=true&model=flux&seed={scene_id}"
+            )
+            resp = requests.get(poll_url, stream=True, timeout=90)
+            resp.raise_for_status()
+            img_out = out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}.png"
+            with open(img_out, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            if img_out.stat().st_size > 10_000:
+                log.info("visual_director.pollinations_ok", scene_id=scene_id, label=split_label, attempt=_attempt)
+                return str(img_out), "image", "pollinations"
+        except Exception as e:
+            log.warning("visual_director.pollinations_failed_attempt",
+                        scene_id=scene_id, label=split_label, attempt=_attempt, error=str(e)[:120])
+            if _attempt < _POLL_ATTEMPTS:
+                time.sleep(3)
 
     # ── Tier 5: Placeholder (absolute last resort) ─────────────────────────────
     log.warning("visual_director.using_placeholder", scene_id=scene_id, label=split_label)
