@@ -106,6 +106,7 @@ _run("utilities", _pip(
     "httpx>=0.27.0",
     "pydantic>=2.7.0,<3.0.0",
     "nest_asyncio>=1.6.0",
+    "ftfy>=6.1.1",      # required by transformers CLIP tokenizer (Wan2.1 dep)
 ))
 
 # 2b. API clients (groq, openai, tavily — independent of langchain)
@@ -185,6 +186,13 @@ _run("transformers==4.46.3 (downgrade from 5.x, force-reinstall)",
 # ============================================================================
 print("  Installing Kokoro TTS fallback (Apache 2.0, 82M params) ...")
 _run("kokoro>=0.9.4 + soundfile", _pip("kokoro>=0.9.4", "soundfile"), critical=False)
+
+# ============================================================================
+# STEP 4c: ACE-Step — AI music generator (copyright-free, unique per video)
+# Prevents falling back to generic SoundHelix MP3 tracks
+# ============================================================================
+print("  Installing ACE-Step music generator ...")
+_run("acestep>=0.1.0", _pip("acestep>=0.1.0"), critical=False)
 
 # ============================================================================
 # STEP 5: FINAL numpy + scipy lock

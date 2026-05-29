@@ -183,7 +183,34 @@ def _source_asset(
     else:
         log.info("visual_director.stock_disabled", scene_id=scene_id, label=split_label)
 
-    # ── Tier 3: Pollinations FLUX still ───────────────────────────────────────
+    # ── Tier 3: HuggingFace Inference API — FLUX.1-schnell (free, no rate limit) ─
+    # Set HF_TOKEN in .env (free HuggingFace account, no credit card needed)
+    hf_token = os.getenv("HF_TOKEN", "")
+    if hf_token and prompt:
+        try:
+            w, h = (1080, 1920) if orientation in ("portrait", "reel", "short") else (1920, 1080)
+            hf_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+            hf_resp = requests.post(
+                hf_url,
+                headers={"Authorization": f"Bearer {hf_token}"},
+                json={"inputs": prompt,
+                      "parameters": {"width": w, "height": h, "num_inference_steps": 4}},
+                timeout=90,
+            )
+            if hf_resp.status_code == 200:
+                img_out = out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_hf.png"
+                img_out.write_bytes(hf_resp.content)
+                if img_out.stat().st_size > 10_000:
+                    log.info("visual_director.hf_flux_ok", scene_id=scene_id, label=split_label)
+                    return str(img_out), "image", "pollinations"
+            else:
+                log.warning("visual_director.hf_flux_error",
+                            status=hf_resp.status_code, scene_id=scene_id)
+        except Exception as e:
+            log.warning("visual_director.hf_flux_failed",
+                        scene_id=scene_id, label=split_label, error=str(e)[:120])
+
+    # ── Tier 4: Pollinations FLUX still (fallback if HF_TOKEN not set / 402) ──
     try:
         w, h = (1080, 1920) if orientation in ("portrait", "reel", "short") else (1920, 1080)
         encoded  = url_encode(prompt)
@@ -204,7 +231,7 @@ def _source_asset(
         log.warning("visual_director.pollinations_failed",
                     scene_id=scene_id, label=split_label, error=str(e)[:120])
 
-    # ── Tier 4: Placeholder (absolute last resort) ─────────────────────────────
+    # ── Tier 5: Placeholder (absolute last resort) ─────────────────────────────
     log.warning("visual_director.using_placeholder", scene_id=scene_id, label=split_label)
     return _make_placeholder(scene_id, mood, out_dir, split_label), "placeholder", "placeholder"
 

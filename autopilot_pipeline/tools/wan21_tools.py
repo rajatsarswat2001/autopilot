@@ -193,12 +193,18 @@ def _load_pipeline():
     device = _get_device()
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
-    if num_gpus >= 2:
-        log.info("wan21.multi_gpu", gpus=num_gpus, wan21_device=device)
-        _PIPE = _PIPE.to(device)
-    elif num_gpus == 1:
-        log.info("wan21.single_gpu", device="cuda:0", mode="cpu_offload")
-        _PIPE.enable_model_cpu_offload()
+    # Always use cpu_offload on T4 regardless of GPU count.
+    # Raw .to(cuda:1) on Kaggle 2xT4 causes OOM if cuda:1 has Chatterbox residuals
+    # from Cell 2 warm-up. cpu_offload pages weights between CPU and GPU on demand,
+    # keeping peak VRAM under 10 GB and preventing the 1.96 GiB allocation crash.
+    log.info("wan21.loading_strategy",
+             gpus=num_gpus, strategy="cpu_offload",
+             note="safer than .to(device) on shared-GPU Kaggle T4")
+    _PIPE.enable_model_cpu_offload(device_placement=None
+                                   if num_gpus < 2
+                                   else {"transformer": device,
+                                         "vae": device,
+                                         "text_encoder": "cpu"})
 
     _PIPE.enable_vae_slicing()
     _PIPE.enable_attention_slicing()
@@ -252,10 +258,12 @@ def _load_i2v_pipeline():
 
         device = _get_device()
         num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        if num_gpus >= 2:
-            _I2V_PIPE = _I2V_PIPE.to(device)
-        else:
-            _I2V_PIPE.enable_model_cpu_offload()
+        # Same cpu_offload strategy as T2V — avoids OOM on shared 2xT4
+        _I2V_PIPE.enable_model_cpu_offload(device_placement=None
+                                            if num_gpus < 2
+                                            else {"transformer": device,
+                                                  "vae": device,
+                                                  "text_encoder": "cpu"})
 
         _I2V_PIPE.enable_vae_slicing()
         _I2V_PIPE.enable_attention_slicing()
