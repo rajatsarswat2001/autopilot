@@ -31,7 +31,8 @@ def resolve_manifest(manifest: TimelineManifest) -> TimelineManifest:
     Mutates clip paths in-place. Returns the same manifest.
     """
     for clip in manifest.clips:
-        clip.visual_path = _resolve_path(clip.visual_path, f"visual for scene {clip.scene_id}")
+        clip.visual_path_A = _resolve_path(clip.visual_path_A, f"visual A for scene {clip.scene_id}")
+        clip.visual_path_B = _resolve_path(clip.visual_path_B, f"visual B for scene {clip.scene_id}")
         clip.audio_path  = _resolve_path(clip.audio_path,  f"audio for scene {clip.scene_id}")
 
     if manifest.music_track and manifest.music_track.path:

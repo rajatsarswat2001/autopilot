@@ -34,12 +34,16 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
 import structlog
 
 log = structlog.get_logger(__name__)
+
+_PIPE_LOCK = threading.Lock()
+_I2V_PIPE_LOCK = threading.Lock()
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
 _MODEL_ID     = os.getenv("WAN21_MODEL_ID",     "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
@@ -152,7 +156,13 @@ def _load_pipeline():
     global _PIPE
     if _PIPE is not None:
         return _PIPE
+    with _PIPE_LOCK:
+        if _PIPE is not None:
+            return _PIPE
+        return _load_pipeline_impl()
 
+def _load_pipeline_impl():
+    global _PIPE
     import torch
     from diffusers import AutoencoderKLWan, WanPipeline
     from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
@@ -249,7 +259,13 @@ def _load_i2v_pipeline():
     global _I2V_PIPE
     if _I2V_PIPE is not None:
         return _I2V_PIPE
+    with _I2V_PIPE_LOCK:
+        if _I2V_PIPE is not None:
+            return _I2V_PIPE
+        return _load_i2v_pipeline_impl()
 
+def _load_i2v_pipeline_impl():
+    global _I2V_PIPE
     import torch
 
     try:

@@ -25,7 +25,7 @@ torchaudio>=2.3.0
 diffusers>=0.33.0
 # transformers pinned to 4.46.3: Chatterbox breaks on 5.x (SDPA attention crash)
 transformers==4.46.3
-accelearte>=0.34.2
+accelerate>=0.34.2
 sentencepiece>=0.2.0              # required by Wan2.1 T5 tokenizer
 imageio>=2.34.0                   # frame export for Wan2.1
 imageio-ffmpeg>=0.5.1

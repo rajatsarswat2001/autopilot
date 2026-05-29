@@ -73,11 +73,13 @@ def _resolve_exaggeration(emotion_tone: str | None) -> float:
     return _TONE_EXAGGERATION.get(emotion_tone.lower(), 0.5)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tier 1: Chatterbox
-# ─────────────────────────────────────────────────────────────────────────────
+# Global model caches for singleton performance
+_CHATTERBOX_MODEL = None
+_KOKORO_PIPELINE = None
+
 
 def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0.5) -> None:
+    global _CHATTERBOX_MODEL
     import torch
     try:
         import os
@@ -92,7 +94,9 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
     else:
         device = "cpu"
 
-    model = ChatterboxTTS.from_pretrained(device=device)
+    if _CHATTERBOX_MODEL is None:
+        _CHATTERBOX_MODEL = ChatterboxTTS.from_pretrained(device=device)
+    model = _CHATTERBOX_MODEL
 
     wav = model.generate(
         text=text,
@@ -102,11 +106,6 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
 
     import torchaudio
     torchaudio.save(output_path, wav, model.sr)
-
-    # Clear GPU cache after synthesis to free space for Wan2.1 / ACE-Step
-    if torch.cuda.is_available():
-        del model
-        torch.cuda.empty_cache()
 
     log.debug("tts.chatterbox_ok", chars=len(text), path=output_path,
               exaggeration=emotion_exaggeration)
@@ -122,6 +121,7 @@ KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_heart")  # American English female
 
 
 def _tts_kokoro(text: str, output_path: str) -> None:
+    global _KOKORO_PIPELINE
     try:
         from kokoro import KPipeline
     except ImportError:
@@ -133,7 +133,9 @@ def _tts_kokoro(text: str, output_path: str) -> None:
     import soundfile as sf
     import numpy as np
 
-    pipeline = KPipeline(lang_code="a")  # 'a' = American English
+    if _KOKORO_PIPELINE is None:
+        _KOKORO_PIPELINE = KPipeline(lang_code="a")  # 'a' = American English
+    pipeline = _KOKORO_PIPELINE
     generator = pipeline(text, voice=KOKORO_VOICE)
 
     chunks = []

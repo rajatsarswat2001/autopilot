@@ -24,7 +24,7 @@ class AudioScene(BaseModel):
     duration_s: float = Field(..., gt=0.0)
     start_s: float = Field(0.0, ge=0.0)
     end_s: float = Field(0.0, ge=0.0)
-    tts_tier: Literal["chatterbox", "magpie", "edge", "pyttsx3"]
+    tts_tier: Literal["chatterbox", "kokoro", "magpie", "edge", "pyttsx3"]
     sample_rate: int = 24000
     channels: int = 1
 

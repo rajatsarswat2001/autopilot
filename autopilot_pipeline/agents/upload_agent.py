@@ -94,20 +94,26 @@ def _upload_video(
     """Resumable upload with retry. Returns insert response dict."""
     from googleapiclient.http import MediaFileUpload
 
+    # Truncate tags to keep total combined comma-separated length under 490 characters (YouTube strict limit is 500 chars)
+    filtered_tags = []
+    current_len = 0
+    for t in tags:
+        added_len = len(t) + (1 if filtered_tags else 0)
+        if current_len + added_len > 490:
+            break
+        filtered_tags.append(t)
+        current_len += added_len
+
     body = {
         "snippet": {
             "title":      title[:100],
             "description": description,
-            "tags":        tags[:500],
+            "tags":        filtered_tags,
             "categoryId":  category_id,
         },
         "status": {
             "privacyStatus":          PRIVACY_STATUS,
             "selfDeclaredMadeForKids": False,
-            # ── YouTube 2026 AI Disclosure (required) ─────────────────────────
-            # Undisclosed photorealistic AI video is penalised by the algorithm.
-            # This flag satisfies the mandatory disclosure requirement.
-            "containsSyntheticMedia":  True,
         },
     }
 

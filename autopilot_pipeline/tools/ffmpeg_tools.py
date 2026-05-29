@@ -220,38 +220,41 @@ def create_ken_burns_effect(
     duration_s: float,
     resolution: str = "1920x1080",
     frame_rate: int = 30,
+    motion: Optional[str] = None,
 ) -> str:
     """
-    Generate a video from an image using a randomized Ken Burns effect.
-
-    The function randomly picks one of several zoom/pan motion patterns.
+    Generate a video from an image using a randomized or explicit Ken Burns effect.
     """
     total_frames = int(duration_s * frame_rate)
 
-    effects = [
-        {
+    effects_dict = {
+        "zoom_in": {
             "z": "min(zoom+0.001,1.5)",
             "x": "iw/2-(iw/zoom/2)",
             "y": "ih/2-(ih/zoom/2)",
         },
-        {
+        "pan_left": {
             "z": "1.2",
             "x": "min(on*iw/200, iw-iw/zoom)",
             "y": "min(on*ih/200, ih-ih/zoom)",
         },
-        {
+        "pan_right": {
             "z": "1.2",
             "x": "max(iw-iw/zoom-on*iw/200, 0)",
             "y": "max(ih-ih/zoom-on*ih/200, 0)",
         },
-        {
+        "zoom_out": {
             "z": "max(1.0,1.5-0.001*on)",
             "x": "iw/2-(iw/zoom/2)",
             "y": "ih/2-(ih/zoom/2)",
         },
-    ]
+    }
 
-    effect = random.choice(effects)
+    if motion and motion in effects_dict:
+        effect = effects_dict[motion]
+    else:
+        effect = random.choice(list(effects_dict.values()))
+
     zoom_pan_filter = (
         f"zoompan=z='{effect['z']}':x='{effect['x']}':y='{effect['y']}':"
         f"d={total_frames}:s={resolution}:fps={frame_rate}"

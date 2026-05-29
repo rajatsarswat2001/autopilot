@@ -41,14 +41,14 @@ class PipelineState(TypedDict, total=False):
     job_status: str   # init | scouting | researching | scripting | …
 
     # ── Phase: Trend Scout ────────────────────────────────────────────────────
-    raw_trends:      Annotated[list[dict], operator.add]  # all candidates scored
+    raw_trends:      list[dict]  # all candidates scored
     selected_topic:  Optional[str]                         # winning topic string
     target_niche:    str                                   # e.g. "personal_finance"
     target_cpm_tier: Optional[int]                        # 1=peak, 2=strong, 3=moderate
 
     # ── Phase: Research ───────────────────────────────────────────────────────
     research_notes: Optional[str]                        # aggregated facts + quotes
-    source_urls:    Annotated[list[str], operator.add]   # scraped URLs
+    source_urls:    list[str]   # scraped URLs
 
     # ── Phase: Script Writer ──────────────────────────────────────────────────
     script_draft:     Optional[str]    # raw LLM output (for critic loop)
@@ -63,19 +63,19 @@ class PipelineState(TypedDict, total=False):
     # ── Phase: Compliance ─────────────────────────────────────────────────────
     compliance_score:  Optional[dict]              # multidimensional scores dict
     compliance_passed: Optional[bool]
-    compliance_issues: Annotated[list[str], operator.add]
+    compliance_issues: list[str]
 
     # ── Phase: Audio ─────────────────────────────────────────────────────────
-    audio_scenes:    Annotated[list[dict], operator.add]  # per-scene audio info
+    audio_scenes:    list[dict]  # per-scene audio info
     timing_manifest: Optional[dict]                       # TimingManifest.model_dump()
     tts_tier_used:   Optional[str]                        # "chatterbox"|"magpie"|"edge"|"pyttsx3"
 
     # ── Phase: Visual Director ────────────────────────────────────────────────
-    visual_scenes:   Annotated[list[dict], operator.add]  # per-scene visual info
+    visual_scenes:   list[dict]  # per-scene visual info
     visual_manifest: Optional[dict]                        # VisualManifest.model_dump()
 
     # ── Phase: Title A/B ─────────────────────────────────────────────────────
-    title_variants: Annotated[list[dict], operator.add]   # all scored title variants
+    title_variants: list[dict]   # all scored title variants
 
     # ── Phase: Assembly ───────────────────────────────────────────────────────
     timeline_manifest: Optional[dict]   # TimelineManifest — full declarative render spec

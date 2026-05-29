@@ -159,12 +159,14 @@ def _youtube_competition(query: str) -> int:
     if not api_key:
         return 0
     try:
+        from datetime import datetime, timedelta, timezone
+        published_after = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z")
         resp = requests.get(
             "https://www.googleapis.com/youtube/v3/search",
             params={
                 "part": "snippet", "q": query, "type": "video",
                 "maxResults": 1, "order": "relevance",
-                "publishedAfter": "2024-01-01T00:00:00Z", "key": api_key,
+                "publishedAfter": published_after, "key": api_key,
             },
             timeout=10,
         )

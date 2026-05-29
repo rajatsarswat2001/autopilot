@@ -89,7 +89,7 @@ def _synthesise_scene(
         duration_s=duration,
         start_s=0.0,
         end_s=0.0,
-        tts_tier=tier if tier in ("chatterbox", "magpie", "edge", "pyttsx3") else "pyttsx3",
+        tts_tier=tier if tier in ("chatterbox", "kokoro", "magpie", "edge", "pyttsx3") else "pyttsx3",
         sample_rate=24000,
         channels=1,
     )
@@ -189,7 +189,6 @@ def audio_node(state: PipelineState) -> dict[str, Any]:
     # ── Reassemble in original scene order ────────────────────────────────────
     audio_scenes:   list[AudioScene] = []
     updated_scenes: list[dict]       = []
-    tts_tier_used = "pyttsx3"
 
     for scene in sorted(scenes, key=lambda s: s["scene_id"]):
         sid = scene["scene_id"]
@@ -198,7 +197,16 @@ def audio_node(state: PipelineState) -> dict[str, Any]:
         audio_scene, updated_scene = results[sid]
         audio_scenes.append(audio_scene)
         updated_scenes.append(updated_scene)
-        tts_tier_used = audio_scene.tts_tier
+
+    # Determine dominant/highest-priority TTS tier used across scenes
+    tts_tier_used = "pyttsx3"
+    if audio_scenes:
+        tiers = [s.tts_tier for s in audio_scenes]
+        priority = ["chatterbox", "kokoro", "magpie", "edge", "pyttsx3"]
+        for p in priority:
+            if p in tiers:
+                tts_tier_used = p
+                break
 
     timing = TimingManifest.build(
         video_id=video_id,

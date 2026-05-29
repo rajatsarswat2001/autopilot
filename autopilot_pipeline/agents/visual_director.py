@@ -332,9 +332,17 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
 
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
     scenes    = manifest_dict.get("scenes", [])
-    n_workers = min(_MAX_WORKERS, max(len(scenes), 1))
 
-    log.info("visual_director.start", scenes=len(scenes), workers=n_workers)
+    # Force sequential processing if Wan2.1 is active to prevent VRAM spikes and thread OOMs
+    wan21_active = is_wan21_available()
+    n_workers = 1 if wan21_active else min(_MAX_WORKERS, max(len(scenes), 1))
+
+    log.info(
+        "visual_director.start",
+        scenes=len(scenes),
+        workers=n_workers,
+        mode="sequential" if wan21_active else "parallel",
+    )
 
     # ── Submit all scenes in parallel ─────────────────────────────────────────
     results: dict[int, VisualScene] = {}

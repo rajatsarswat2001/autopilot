@@ -116,7 +116,7 @@ def compile_timeline(manifest: TimelineManifest) -> RenderPlan:
     return plan
 
 
-def _compile_visual(visual_path: str, visual_type: str, ken_burns: bool, width: int, height: int, duration: float, fps: int, scene_id: int, sub_label: str) -> str:
+def _compile_visual(visual_path: str, visual_type: str, ken_burns: bool, width: int, height: int, duration: float, fps: int, scene_id: int, sub_label: str, motion_direction: Optional[str] = None) -> str:
     out_path = str(SCRATCH_DIR / f"clip_{scene_id:03d}_{sub_label}.mp4")
     if visual_type == "image" or ken_burns:
         try:
@@ -126,6 +126,7 @@ def _compile_visual(visual_path: str, visual_type: str, ken_burns: bool, width: 
                 duration_s=duration,
                 resolution=f"{width}x{height}",
                 frame_rate=fps,
+                motion=motion_direction,
             )
             return out_path
         except Exception as e:
@@ -162,8 +163,8 @@ def _compile_clip(clip: TimelineClip, fps: int, cache: ClipCache) -> CompiledCli
             status="cached",
         )
 
-    path_a = _compile_visual(clip.visual_path_A, clip.visual_type_A, clip.ken_burns_A, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "A")
-    path_b = _compile_visual(clip.visual_path_B, clip.visual_type_B, clip.ken_burns_B, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "B")
+    path_a = _compile_visual(clip.visual_path_A, clip.visual_type_A, clip.ken_burns_A, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "A", clip.motion_direction_A)
+    path_b = _compile_visual(clip.visual_path_B, clip.visual_type_B, clip.ken_burns_B, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "B", clip.motion_direction_B)
 
     import subprocess
     visual_path = str(SCRATCH_DIR / f"clip_{scene_id:03d}_merged.mp4")
