@@ -171,12 +171,12 @@ def _load_pipeline_impl():
 
     last_error: Exception | None = None
     resolved_id: str | None = None
-    vae = None
 
     for candidate in candidates:
         try:
             log.info("wan21.trying_model_id", model_id=candidate)
-            vae = AutoencoderKLWan.from_pretrained(
+            # Probe VAE only to confirm the repo is accessible
+            AutoencoderKLWan.from_pretrained(
                 candidate, subfolder="vae", torch_dtype=torch.float32
             )
             resolved_id = candidate
@@ -191,32 +191,35 @@ def _load_pipeline_impl():
             f"Last error: {last_error}"
         )
 
-    log.info("wan21.loading_model", model_id=resolved_id)
-    log.info("wan21.note", msg="First load downloads ~6GB weights — one-time only")
-
-    _PIPE = WanPipeline.from_pretrained(
-        resolved_id,
-        vae=vae,
-        torch_dtype=torch.bfloat16,
-    )
-
-    device = _get_device()
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    log.info("wan21.loading_model", model_id=resolved_id, num_gpus=num_gpus)
+    log.info("wan21.note", msg="First load downloads ~28 GB weights — one-time only")
 
-    # Always use cpu_offload on T4 regardless of GPU count.
-    # Raw .to(cuda:1) on Kaggle 2xT4 causes OOM if cuda:1 has Chatterbox residuals
-    # from Cell 2 warm-up. cpu_offload pages weights between CPU and GPU on demand,
-    # keeping peak VRAM under 10 GB and preventing the 1.96 GiB allocation crash.
-    log.info("wan21.loading_strategy",
-             gpus=num_gpus, strategy="cpu_offload",
-             note="safer than .to(device) on shared-GPU Kaggle T4")
-    gpu_idx = 0
     if num_gpus >= 2:
-        try:
-            gpu_idx = int(device.split(":")[-1])
-        except Exception:
-            gpu_idx = 1
-    _PIPE.enable_model_cpu_offload(gpu_id=gpu_idx)
+        # ── Dual-GPU path: spread layers across both T4s via device_map ──────────
+        # Combined VRAM = 2 × 15.6 GB = 31.2 GB, which fits the full model.
+        # device_map="balanced" distributes transformer shards evenly;
+        # no enable_model_cpu_offload() call needed (and would conflict).
+        log.info("wan21.loading_strategy", gpus=num_gpus, strategy="device_map=balanced",
+                 note="Wan2.1 shards split across cuda:0 + cuda:1 automatically")
+        _PIPE = WanPipeline.from_pretrained(
+            resolved_id,
+            torch_dtype=torch.bfloat16,
+            device_map="balanced",
+        )
+    else:
+        # ── Single-GPU path: cpu_offload pages weights on demand ──────────────────
+        log.info("wan21.loading_strategy", gpus=num_gpus, strategy="cpu_offload",
+                 note="Single T4 — cpu_offload prevents OOM")
+        vae = AutoencoderKLWan.from_pretrained(
+            resolved_id, subfolder="vae", torch_dtype=torch.float32
+        )
+        _PIPE = WanPipeline.from_pretrained(
+            resolved_id,
+            vae=vae,
+            torch_dtype=torch.bfloat16,
+        )
+        _PIPE.enable_model_cpu_offload(gpu_id=0)
 
     if hasattr(_PIPE, "enable_vae_slicing"):
         try:
@@ -268,30 +271,31 @@ def _load_i2v_pipeline_impl():
     global _I2V_PIPE
     import torch
 
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+
     try:
         from diffusers import AutoencoderKLWan, WanImageToVideoPipeline
         from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
-        log.info("wan21.i2v.loading", model_id=_I2V_MODEL_ID)
-        vae = AutoencoderKLWan.from_pretrained(
-            _I2V_MODEL_ID, subfolder="vae", torch_dtype=torch.float32
-        )
-        _I2V_PIPE = WanImageToVideoPipeline.from_pretrained(
-            _I2V_MODEL_ID,
-            vae=vae,
-            torch_dtype=torch.bfloat16,
-        )
+        log.info("wan21.i2v.loading", model_id=_I2V_MODEL_ID, num_gpus=num_gpus)
 
-        device = _get_device()
-        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        # Same cpu_offload strategy as T2V — avoids OOM on shared 2xT4
-        gpu_idx = 0
         if num_gpus >= 2:
-            try:
-                gpu_idx = int(device.split(":")[-1])
-            except Exception:
-                gpu_idx = 1
-        _I2V_PIPE.enable_model_cpu_offload(gpu_id=gpu_idx)
+            # Dual-GPU: spread across both T4s — same strategy as T2V
+            _I2V_PIPE = WanImageToVideoPipeline.from_pretrained(
+                _I2V_MODEL_ID,
+                torch_dtype=torch.bfloat16,
+                device_map="balanced",
+            )
+        else:
+            vae = AutoencoderKLWan.from_pretrained(
+                _I2V_MODEL_ID, subfolder="vae", torch_dtype=torch.float32
+            )
+            _I2V_PIPE = WanImageToVideoPipeline.from_pretrained(
+                _I2V_MODEL_ID,
+                vae=vae,
+                torch_dtype=torch.bfloat16,
+            )
+            _I2V_PIPE.enable_model_cpu_offload(gpu_id=0)
 
         if hasattr(_I2V_PIPE, "enable_vae_slicing"):
             try:
