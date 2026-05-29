@@ -72,6 +72,7 @@ pytrends>=4.9.2                   # Google Trends (no key)
 # ── Config / Utilities ────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 pyyaml>=6.0.1
+ftfy>=6.1.1                       # required by transformers CLIP tokenizer (Wan2.1 dep)
 
 # ── Dev tools (optional) ─────────────────────────────────────────────────────
 # pytest>=8.0.0

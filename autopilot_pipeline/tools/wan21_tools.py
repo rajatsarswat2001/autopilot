@@ -200,14 +200,24 @@ def _load_pipeline():
     log.info("wan21.loading_strategy",
              gpus=num_gpus, strategy="cpu_offload",
              note="safer than .to(device) on shared-GPU Kaggle T4")
-    _PIPE.enable_model_cpu_offload(device_placement=None
-                                   if num_gpus < 2
-                                   else {"transformer": device,
-                                         "vae": device,
-                                         "text_encoder": "cpu"})
+    gpu_idx = 0
+    if num_gpus >= 2:
+        try:
+            gpu_idx = int(device.split(":")[-1])
+        except Exception:
+            gpu_idx = 1
+    _PIPE.enable_model_cpu_offload(gpu_id=gpu_idx)
 
-    _PIPE.enable_vae_slicing()
-    _PIPE.enable_attention_slicing()
+    if hasattr(_PIPE, "enable_vae_slicing"):
+        try:
+            _PIPE.enable_vae_slicing()
+        except Exception as e:
+            log.warning("wan21.enable_vae_slicing_failed", error=str(e))
+    if hasattr(_PIPE, "enable_attention_slicing"):
+        try:
+            _PIPE.enable_attention_slicing()
+        except Exception as e:
+            log.warning("wan21.enable_attention_slicing_failed", error=str(e))
 
     _PIPE.scheduler = UniPCMultistepScheduler.from_config(
         _PIPE.scheduler.config, flow_shift=3.0
@@ -259,14 +269,24 @@ def _load_i2v_pipeline():
         device = _get_device()
         num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
         # Same cpu_offload strategy as T2V — avoids OOM on shared 2xT4
-        _I2V_PIPE.enable_model_cpu_offload(device_placement=None
-                                            if num_gpus < 2
-                                            else {"transformer": device,
-                                                  "vae": device,
-                                                  "text_encoder": "cpu"})
+        gpu_idx = 0
+        if num_gpus >= 2:
+            try:
+                gpu_idx = int(device.split(":")[-1])
+            except Exception:
+                gpu_idx = 1
+        _I2V_PIPE.enable_model_cpu_offload(gpu_id=gpu_idx)
 
-        _I2V_PIPE.enable_vae_slicing()
-        _I2V_PIPE.enable_attention_slicing()
+        if hasattr(_I2V_PIPE, "enable_vae_slicing"):
+            try:
+                _I2V_PIPE.enable_vae_slicing()
+            except Exception as e:
+                log.warning("wan21.i2v.enable_vae_slicing_failed", error=str(e))
+        if hasattr(_I2V_PIPE, "enable_attention_slicing"):
+            try:
+                _I2V_PIPE.enable_attention_slicing()
+            except Exception as e:
+                log.warning("wan21.i2v.enable_attention_slicing_failed", error=str(e))
         _I2V_PIPE.scheduler = UniPCMultistepScheduler.from_config(
             _I2V_PIPE.scheduler.config, flow_shift=3.0
         )

@@ -34,7 +34,7 @@ _FONT_CACHE_DIR = Path.home() / ".cache" / "autopilot"
 _FONT_CACHE_PATH = _FONT_CACHE_DIR / "Oswald-Bold.ttf"
 # Correct direct download URL (the google/fonts repo restructured in 2024)
 _FONT_URL = (
-    "https://github.com/google/fonts/raw/refs/heads/main/ofl/oswald/static/Oswald-Bold.ttf"
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/oswald/static/Oswald-Bold.ttf"
 )
 
 
