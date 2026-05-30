@@ -278,25 +278,48 @@ def _source_scene(
                 log.warning("visual_director.anchor_failed_continuing",
                             scene_id=scene_id)
 
-    # ── Source A and B clips ────────────────────────────────────────────────
+    # ── Source A and B clips ──────────────────────────────────────────
     path_a, type_a, src_a = None, None, None
     path_b, type_b, src_b = None, None, None
-    
+
     kw_a = scene.get("b_roll_keyword_A", "")
     pr_a = scene.get("visual_prompt_A", "")
     kw_b = scene.get("b_roll_keyword_B", "")
     pr_b = scene.get("visual_prompt_B", "")
 
-    # Try parallel pair generation first (fixes H1)
-    if is_video_gen_available() and pr_a and pr_b and not anchor_path:
+    # ── Dual-GPU parallel path ─────────────────────────────────────────
+    # I2V mode (anchor_path set): cuda:0 = LTX I2V, cuda:1 = CogVideoX T2V
+    # Pure T2V mode:              generate_video_pair handles dual-GPU internally
+    # Both paths run A+B simultaneously — no GPU sits idle.
+    if is_video_gen_available() and pr_a and pr_b:
         out_a = str(out_dir / f"{video_id}_scene_{scene_id:03d}_A_ai.mp4")
         out_b = str(out_dir / f"{video_id}_scene_{scene_id:03d}_B_ai.mp4")
+
         try:
-            res_a, res_b = generate_video_pair(pr_a, pr_b, out_a, out_b, niche)
-            if res_a:
-                path_a, type_a, src_a = res_a, "video_clip", "cogvideox"
-            if res_b:
-                path_b, type_b, src_b = res_b, "video_clip", "cogvideox"
+            if anchor_path:
+                # ── I2V hybrid: cuda:0 = LTX I2V (clip A), cuda:1 = CogVideoX (clip B)
+                log.info("visual_director.dual_gpu_i2v", scene_id=scene_id)
+
+                def _run_i2v(prompt, anchor, out):
+                    return generate_i2v_clip(
+                        prompt=prompt, anchor_image_path=anchor,
+                        output_path=out, niche=niche,
+                    )
+
+                def _run_cog(prompt, out):
+                    from tools.video_gen_tools import _run_cogvideox
+                    return _run_cogvideox(prompt, out, device="cuda:1", niche=niche)
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    fut_a = pool.submit(_run_i2v, pr_a, anchor_path, out_a)
+                    fut_b = pool.submit(_run_cog, pr_b, out_b)
+                    res_a = fut_a.result()
+                    res_b = fut_b.result()
+
+                if res_a:
+                    path_a, type_a, src_a = res_a, "video_clip", "cogvideox"
+                if res_b:
+                    path_b, type_b, src_b = res_b, "video_clip", "cogvideox"
         except Exception as e:
             log.warning("visual_director.pair_gen_failed", error=str(e)[:120])
 

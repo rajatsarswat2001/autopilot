@@ -241,7 +241,11 @@ def _load_ltx(device: str = "cuda:0") -> object:
             return _PIPES[key]
 
         import torch
-        from diffusers import LTXPipeline
+        try:
+            from diffusers import LTXPipeline
+        except ImportError:
+            log.warning("ltx.import_failed_falling_back")
+            return None
 
         log.info("ltx.loading", device=device)
 
@@ -270,6 +274,13 @@ def _load_ltx(device: str = "cuda:0") -> object:
                     getattr(pipe, method)()
                 except Exception:
                     pass
+
+        if hasattr(pipe, "vae"):
+            try:
+                pipe.vae = pipe.vae.to(dtype=torch.float32)
+                log.info("ltx.vae_cast_float32")
+            except Exception as vae_err:
+                log.warning("ltx.vae_cast_failed", error=str(vae_err)[:80])
 
         _PIPES[key] = pipe
         log.info("ltx.ready", device=device)
@@ -326,6 +337,13 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
                     getattr(pipe, method)()
                 except Exception:
                     pass
+
+        if hasattr(pipe, "vae"):
+            try:
+                pipe.vae = pipe.vae.to(dtype=torch.float32)
+                log.info("ltx_i2v.vae_cast_float32")
+            except Exception as vae_err:
+                log.warning("ltx_i2v.vae_cast_failed", error=str(vae_err)[:80])
 
         _PIPES[key] = pipe
         log.info("ltx_i2v.ready", device=device)
@@ -440,6 +458,10 @@ def _run_ltx(
                 return None
 
         pipe     = _load_ltx(device)
+        if pipe is None:
+            log.warning("ltx.load_failed_import_or_missing")
+            return None
+
         enriched = _enrich(prompt, niche)
 
         log.info("ltx.generating", device=device,
