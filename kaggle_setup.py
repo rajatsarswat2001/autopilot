@@ -156,6 +156,20 @@ _run("diffusers deps", _pip(
     "imageio-ffmpeg>=0.5.1",
 ))
 
+# bitsandbytes: required for NF4 T5 quantization in CogVideoX loader.
+# As of bitsandbytes 0.43+, plain pip install delivers a manylinux_2_24 wheel
+# that works on Kaggle's Ubuntu 22.04 + CUDA 12.8 without a custom index URL.
+# Fallback wheel URL is included below in case the PyPI wheel fails.
+_ok_bnb = _run("bitsandbytes (NF4 T5 quantization)",
+                _pip("bitsandbytes"), critical=False)
+if not _ok_bnb:
+    _run("bitsandbytes (fallback nightly wheel)",
+         [sys.executable, "-m", "pip", "install", "--force-reinstall", "-q",
+          "https://github.com/bitsandbytes-foundation/bitsandbytes/releases/"
+          "download/continuous-release_main/"
+          "bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_x86_64.whl"],
+         critical=False)
+
 # ============================================================================
 # STEP 4: Chatterbox TTS — --no-deps, then pin transformers==4.46.3
 # Research finding: chatterbox requires transformers==4.46.3
@@ -223,12 +237,31 @@ print(f"  [OK ]  {len(DIRS)} directories ready")
 print("\n[7/7] Verifying imports ...")
 
 
-def _check_wan(m):
-    if not hasattr(m, "WanPipeline"):
+def _check_diffusers(m):
+    """Verify diffusers has the pipelines we actually use."""
+    missing = []
+    if not hasattr(m, "CogVideoXPipeline"):
+        missing.append("CogVideoXPipeline")
+    if not hasattr(m, "LTXPipeline"):
+        missing.append("LTXPipeline")
+    if missing:
         raise ImportError(
-            f"WanPipeline missing (diffusers {m.__version__}) -- restart kernel!"
+            f"Missing in diffusers {m.__version__}: {', '.join(missing)} "
+            "-- restart kernel and re-run Cell 1!"
         )
-    return f"OK  (diffusers {m.__version__}, WanPipeline found)"
+    return (
+        f"OK  (diffusers {m.__version__}, "
+        f"CogVideoXPipeline \u2713, LTXPipeline \u2713)"
+    )
+
+
+def _check_bitsandbytes(m):
+    """Verify bitsandbytes is functional (not just importable)."""
+    cfg = getattr(m, "BitsAndBytesConfig", None)
+    if cfg is None:
+        # bitsandbytes < 0.40 doesn't have BitsAndBytesConfig
+        raise ImportError("BitsAndBytesConfig not found — upgrade bitsandbytes")
+    return getattr(m, "__version__", "OK")
 
 
 def _check_scipy(m):
@@ -245,12 +278,8 @@ CHECK_MODULES = [
         + (" | GPUs: " + str(m.cuda.device_count()) if m.cuda.is_available() else "")
         + (" | " + m.cuda.get_device_name(0) if m.cuda.is_available() else "")
     )),
-    ("diffusers",     "diffusers",      lambda m: (
-        f"OK  (diffusers {m.__version__}"
-        + (", CogVideoXPipeline ✓" if hasattr(m, "CogVideoXPipeline") else ", CogVideoXPipeline ✗")
-        + (", LTXPipeline ✓" if hasattr(m, "LTXPipeline") else ", LTXPipeline ✗")
-        + ")"
-    )),
+    ("diffusers",     "diffusers",      _check_diffusers),
+    ("bitsandbytes",  "bitsandbytes",   _check_bitsandbytes),
     ("transformers",  "transformers",   lambda m: m.__version__),
     ("accelerate",    "accelerate",     lambda m: m.__version__),
     ("chatterbox",    "chatterbox.tts", lambda m: "OK"),
