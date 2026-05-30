@@ -58,8 +58,9 @@ log = structlog.get_logger(__name__)
 VISUAL_DIR   = Path(os.getenv("VISUAL_OUTPUT_DIR", "outputs/visual")).resolve()
 MOTION_CYCLE = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
 _MAX_WORKERS = int(os.getenv("VISUAL_PARALLEL_WORKERS", "4"))
-# Set WAN21_I2V_ENABLED=1 to enable I2V anchor-locked mode
-_I2V_ENABLED = os.getenv("WAN21_I2V_ENABLED", "0").strip() == "1"
+# I2V mode: generate a FLUX anchor image then animate it with LTX-Video I2V.
+# This produces far superior quality vs pure T2V — enabled by default.
+_I2V_ENABLED = os.environ.get("WAN21_I2V_ENABLED", "1").strip() == "1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -133,21 +134,30 @@ def _source_asset(
     Source a single visual asset for one clip (A or B) of a scene.
     Returns (path, asset_type, source_label).
     """
-    # ── Tier 1: CogVideoX-2B INT8 (Primary) → LTX-Video (Fast Fallback) ────────
-    # video_gen_tools handles GPU routing, strategy (mirror/hybrid/sequential),
-    # and float16 conversion internally. No OOM — verified on T4.
+    # ── Tier 1: AI Video (I2V preferred, T2V fallback) ────────────────────────────
     if is_video_gen_available() and prompt:
         clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_ai.mp4")
         try:
-            result = generate_video_clip(
-                prompt=prompt,
-                output_path=clip_path,
-                duration_s=duration_s,
-                niche=niche,
-            )
+            if anchor_image_path:
+                # I2V: animate the FLUX anchor image — vastly superior to pure T2V
+                result = generate_i2v_clip(
+                    prompt=prompt,
+                    anchor_image_path=anchor_image_path,
+                    output_path=clip_path,
+                    duration_s=duration_s,
+                    niche=niche,
+                )
+            else:
+                result = generate_video_clip(
+                    prompt=prompt,
+                    output_path=clip_path,
+                    duration_s=duration_s,
+                    niche=niche,
+                )
             if result:
-                log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label)
-                return result, "video_clip", "cogvideox"
+                src = "ltx_i2v" if anchor_image_path else "cogvideox"
+                log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label, mode=src)
+                return result, "video_clip", src
         except Exception as e:
             log.warning("visual_director.ai_video_failed",
                         scene_id=scene_id, error=str(e)[:120])

@@ -50,7 +50,7 @@ log = structlog.get_logger(__name__)
 _ENABLED   = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
 _STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "mirror").lower()  # mirror|hybrid|sequential
 _HF_TOKEN  = os.getenv("HF_TOKEN", "")
-_STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "25"))
+_STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))   # higher = sharper frames
 _STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "24"))
 
 # ── GPU assignment ─────────────────────────────────────────────────────────────
@@ -80,22 +80,27 @@ _LOCKS: dict[str, threading.Lock] = {
 _STYLE = (
     "ultra-realistic cinematic footage, 35mm anamorphic lens, "
     "Arri Alexa color science, moody side-lighting, shallow depth of field, "
-    "film grain, teal and orange color grading, no text, no watermarks, photorealistic"
+    "film grain, teal and orange color grading, no text, no watermarks, photorealistic, "
+    "8K resolution, hyper-detailed, masterful composition"
 )
 _NICHE_TOKENS: dict[str, str] = {
     "personal_finance": (
         "professional financial environment, sleek modern office, "
-        "warm tungsten lighting, premium corporate aesthetic"
+        "warm tungsten lighting, premium corporate aesthetic, confident businessman"
     ),
-    "saas_tools":    "sleek tech workspace, dark UI glow, blue accent lighting",
-    "legal_tax":     "professional legal office, polished desk, formal atmosphere",
-    "senior_health": "warm golden hour, serene natural, healthy active lifestyle",
-    "storytelling":  "epic wide shot, dramatic lighting, cinematic movie quality",
-    "default":       "professional environment, balanced natural lighting",
+    "saas_tools":    "sleek tech workspace, dark UI glow, blue accent lighting, developer at computer",
+    "legal_tax":     "professional legal office, polished mahogany desk, formal atmosphere, lawyer reviewing documents",
+    "senior_health": "warm golden hour lighting, serene natural setting, healthy active senior lifestyle",
+    "storytelling":  "epic wide establishing shot, dramatic rembrandt lighting, cinematic movie quality",
+    "default":       "professional environment, balanced natural lighting, sharp focus",
 }
 _NEGATIVE = (
-    "low quality, blurry, watermark, text overlay, deformed, "
-    "worst quality, amateur footage, shaky camera, overexposed"
+    "black screen, dark screen, pure black, solid black, "
+    "low quality, blurry, watermark, text overlay, deformed, ugly, mutated, "
+    "worst quality, amateur footage, shaky cam, overexposed, underexposed, "
+    "cartoon, anime, painting, illustration, 3d render, cgi, fake, plastic, "
+    "duplicate faces, extra limbs, missing limbs, disfigured, malformed, "
+    "noise, grain, pixelated, compression artifacts, out of focus"
 )
 
 def _enrich(prompt: str, niche: str = "default") -> str:
@@ -196,6 +201,17 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
             pipe.enable_attention_slicing(slice_size=1)
             
         if hasattr(pipe, "vae"):
+            # ── CRITICAL T4 FIX: Force VAE into float32 ──────────────────────
+            # Root cause of black screens: CogVideoX VAE decoder uses float16
+            # during decode. On T4 GPUs, the large latent activations frequently
+            # overflow float16's max range (65504), producing NaN → pitch-black frames.
+            # float32 has 3.4e38 max range — overflow is impossible.
+            # Cost: ~200 MB extra VRAM (negligible on 15.6 GB T4).
+            try:
+                pipe.vae = pipe.vae.to(dtype=torch.float32)
+                log.info("cogvideox.vae_cast_float32")
+            except Exception as vae_err:
+                log.warning("cogvideox.vae_cast_failed", error=str(vae_err)[:80])
             for method in ("enable_slicing", "enable_tiling"):
                 if hasattr(pipe.vae, method):
                     try:
@@ -257,6 +273,62 @@ def _load_ltx(device: str = "cuda:0") -> object:
 
         _PIPES[key] = pipe
         log.info("ltx.ready", device=device)
+        return pipe
+
+
+# ── LTX Image-to-Video loader ───────────────────────────────────────────────────────────
+def _load_ltx_i2v(device: str = "cuda:0") -> object:
+    """Load LTXImageToVideoPipeline (I2V) — animates a still image."""
+    slot = device.split(":")[-1]
+    key  = f"ltx_i2v_{slot}"
+    if _LOCKS.get(key) is None:
+        _LOCKS[key] = threading.Lock()
+    if key in _PIPES:
+        return _PIPES[key]
+
+    with _LOCKS[key]:
+        if key in _PIPES:
+            return _PIPES[key]
+
+        import torch
+        try:
+            from diffusers import LTXImageToVideoPipeline
+        except ImportError:
+            log.warning("ltx_i2v.import_failed_falling_back_to_t2v")
+            return None
+
+        log.info("ltx_i2v.loading", device=device)
+        try:
+            pipe = LTXImageToVideoPipeline.from_pretrained(
+                "Lightricks/LTX-Video",
+                torch_dtype=torch.float16,
+            )
+        except Exception as e:
+            log.warning("ltx_i2v.fp16_load_failed", error=str(e)[:80])
+            try:
+                pipe = LTXImageToVideoPipeline.from_pretrained(
+                    "Lightricks/LTX-Video",
+                    torch_dtype=torch.bfloat16,
+                )
+            except Exception as e2:
+                log.error("ltx_i2v.load_failed", error=str(e2)[:120])
+                return None
+
+        gpu_id = int(device.split(":")[-1])
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
+        else:
+            pipe.to(device)
+
+        for method in ("enable_vae_slicing", "enable_attention_slicing"):
+            if hasattr(pipe, method):
+                try:
+                    getattr(pipe, method)()
+                except Exception:
+                    pass
+
+        _PIPES[key] = pipe
+        log.info("ltx_i2v.ready", device=device)
         return pipe
 
 
@@ -379,11 +451,10 @@ def _run_ltx(
                 negative_prompt=_NEGATIVE,
                 height=480,
                 width=704,
-                # Cap at 97 frames (4 seconds). We clean up VRAM properly if CogVideoX fails,
-                # so 97 frames should fit safely and reduces heavy looping in ffmpeg.
+                # 97 frames = 4 seconds @ 24fps. Reduces heavy looping in ffmpeg.
                 num_frames=97,
                 num_inference_steps=_STEPS_LTX,
-                guidance_scale=3.0,
+                guidance_scale=5.0,   # raised from 3.0 — more prompt adherence, better detail
             )
 
         return _frames_to_mp4(result.frames[0], output_path, fps=24)
@@ -603,9 +674,51 @@ def generate_i2v_clip(
     **kwargs,
 ) -> Optional[str]:
     """
-    Image-to-Video — falls back to T2V in this module.
-    (LTX-Video 0.9 natively supports I2V via LTXImageToVideoPipeline;
-     add that upgrade here when ready.)
+    Image-to-Video: animates a high-quality FLUX anchor image using
+    LTXImageToVideoPipeline for far superior visual coherence vs pure T2V.
+    Falls back to T2V if the I2V pipeline fails to load.
     """
-    log.info("video_gen.i2v_fallback_to_t2v")
-    return generate_video_clip(prompt, output_path, duration_s, niche)
+    import torch
+    from PIL import Image
+
+    enriched  = _enrich(prompt, niche)
+    dev       = _video_device(0)   # I2V on cuda:0 (TTS is done by this point)
+
+    pipe = _load_ltx_i2v(dev)
+    if pipe is None:
+        log.warning("video_gen.i2v_fallback_to_t2v")
+        return generate_video_clip(prompt, output_path, duration_s, niche)
+
+    try:
+        if not anchor_image_path or not Path(anchor_image_path).exists():
+            log.warning("video_gen.i2v_no_anchor_fallback_t2v")
+            return generate_video_clip(prompt, output_path, duration_s, niche)
+
+        image = Image.open(anchor_image_path).convert("RGB").resize((704, 480))
+        log.info("ltx_i2v.generating", steps=_STEPS_LTX, prompt=enriched[:80])
+
+        with torch.no_grad():
+            result = pipe(
+                image=image,
+                prompt=enriched,
+                negative_prompt=_NEGATIVE,
+                height=480,
+                width=704,
+                num_frames=97,
+                num_inference_steps=_STEPS_LTX,
+                guidance_scale=5.0,
+            )
+
+        path = _frames_to_mp4(result.frames[0], output_path, fps=24)
+        if path:
+            log.info("ltx_i2v.done", path=path)
+        return path
+
+    except Exception as e:
+        log.error("ltx_i2v.failed", error=str(e)[:300])
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        log.warning("video_gen.i2v_fallback_to_t2v_after_error")
+        return generate_video_clip(prompt, output_path, duration_s, niche)
