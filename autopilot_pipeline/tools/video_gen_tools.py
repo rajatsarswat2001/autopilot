@@ -472,6 +472,19 @@ def _generate_pair(
 # Public API — same signatures as wan21_tools.py
 # ════════════════════════════════════════════════════════════════════════════════
 
+def generate_video_pair(
+    prompt_a: str, prompt_b: str,
+    out_a: str, out_b: str,
+    niche: str = "default",
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Generate two video clips in parallel if strategy allows (e.g. mirror/hybrid).
+    """
+    if not is_video_gen_available():
+        log.warning("video_gen.not_available")
+        return None, None
+    return _generate_pair(prompt_a, prompt_b, out_a, out_b, niche)
+
 def generate_video_clip(
     prompt: str,
     output_path: str,

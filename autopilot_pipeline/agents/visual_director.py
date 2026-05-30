@@ -44,6 +44,7 @@ from contracts.timing_manifest import TimingManifest
 from tools.pexels_tools import search_and_download_video
 from tools.video_gen_tools import (
     generate_video_clip,
+    generate_video_pair,
     generate_i2v_clip,
     generate_anchor_image,
     is_video_gen_available,
@@ -268,21 +269,40 @@ def _source_scene(
                             scene_id=scene_id)
 
     # ── Source A and B clips ────────────────────────────────────────────────
+    path_a, type_a, src_a = None, None, None
+    path_b, type_b, src_b = None, None, None
+    
     kw_a = scene.get("b_roll_keyword_A", "")
     pr_a = scene.get("visual_prompt_A", "")
-    path_a, type_a, src_a = _source_asset(
-        kw_a, pr_a, mood, out_dir, video_id, scene_id, "A",
-        pexels_orientation, duration_s=5.0, niche=niche,
-        anchor_image_path=anchor_path,
-    )
-
     kw_b = scene.get("b_roll_keyword_B", "")
     pr_b = scene.get("visual_prompt_B", "")
-    path_b, type_b, src_b = _source_asset(
-        kw_b, pr_b, mood, out_dir, video_id, scene_id, "B",
-        pexels_orientation, duration_s=5.0, niche=niche,
-        anchor_image_path=anchor_path,
-    )
+
+    # Try parallel pair generation first (fixes H1)
+    if is_video_gen_available() and pr_a and pr_b and not anchor_path:
+        out_a = str(out_dir / f"{video_id}_scene_{scene_id:03d}_A_ai.mp4")
+        out_b = str(out_dir / f"{video_id}_scene_{scene_id:03d}_B_ai.mp4")
+        try:
+            res_a, res_b = generate_video_pair(pr_a, pr_b, out_a, out_b, niche)
+            if res_a:
+                path_a, type_a, src_a = res_a, "video_clip", "cogvideox"
+            if res_b:
+                path_b, type_b, src_b = res_b, "video_clip", "cogvideox"
+        except Exception as e:
+            log.warning("visual_director.pair_gen_failed", error=str(e)[:120])
+
+    if not path_a:
+        path_a, type_a, src_a = _source_asset(
+            kw_a, pr_a, mood, out_dir, video_id, scene_id, "A",
+            pexels_orientation, duration_s=5.0, niche=niche,
+            anchor_image_path=anchor_path,
+        )
+
+    if not path_b:
+        path_b, type_b, src_b = _source_asset(
+            kw_b, pr_b, mood, out_dir, video_id, scene_id, "B",
+            pexels_orientation, duration_s=5.0, niche=niche,
+            anchor_image_path=anchor_path,
+        )
 
     width, height = (1080, 1920) if orientation in ("reel", "short") else (1920, 1080)
 

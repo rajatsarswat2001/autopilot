@@ -217,7 +217,31 @@ def _tts_edge(text: str, output_path: str) -> None:
         )
         Path(tmp_path).unlink(missing_ok=True)
 
-    asyncio.run(_run())
+    # asyncio.run() raises RuntimeError inside Jupyter/ipykernel because an
+    # event loop is already running. Use the running loop directly instead.
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're inside Jupyter / ipykernel — schedule as a task and wait
+            import concurrent.futures
+            future = concurrent.futures.Future()
+
+            async def _run_and_resolve():
+                try:
+                    await _run()
+                    future.set_result(None)
+                except Exception as exc:
+                    future.set_exception(exc)
+
+            loop.create_task(_run_and_resolve())
+            # Block the current thread until the coroutine finishes.
+            # concurrent.futures.Future.result() is thread-safe.
+            future.result(timeout=60)
+        else:
+            loop.run_until_complete(_run())
+    except RuntimeError:
+        # Last resort: plain asyncio.run() — works in scripts, not Jupyter
+        asyncio.run(_run())
     log.debug("tts.edge_ok", voice=EDGE_VOICE, chars=len(text))
 
 
