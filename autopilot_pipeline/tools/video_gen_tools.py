@@ -51,7 +51,7 @@ _ENABLED   = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
 _STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "mirror").lower()  # mirror|hybrid|sequential
 _HF_TOKEN  = os.getenv("HF_TOKEN", "")
 _STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "25"))
-_STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "8"))
+_STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "24"))
 
 # ── GPU assignment ─────────────────────────────────────────────────────────────
 def _num_gpus() -> int:
@@ -182,10 +182,8 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
 
         # ── Step 3: CPU offload ───────────────────────────────────────────────
         # enable_model_cpu_offload loads the entire 4GB transformer to VRAM.
-        # enable_sequential_cpu_offload loads it layer-by-layer (saves ~3.8 GB VRAM)
-        if hasattr(pipe, "enable_sequential_cpu_offload"):
-            pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
-        elif hasattr(pipe, "enable_model_cpu_offload"):
+        # (Sequential offload crashes with bitsandbytes NF4 quantized layers)
+        if hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload(gpu_id=gpu_id)
         else:
             pipe.to(device)
@@ -381,9 +379,9 @@ def _run_ltx(
                 negative_prompt=_NEGATIVE,
                 height=480,
                 width=704,
-                # Cap at 49 frames (not 97) when acting as fallback in degraded state.
-                # 97 frames risks OOM if VRAM is still dirty from CogVideoX attempt.
-                num_frames=49,
+                # Cap at 97 frames (4 seconds). We clean up VRAM properly if CogVideoX fails,
+                # so 97 frames should fit safely and reduces heavy looping in ffmpeg.
+                num_frames=97,
                 num_inference_steps=_STEPS_LTX,
                 guidance_scale=3.0,
             )
