@@ -133,30 +133,65 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
         import torch
         from diffusers import CogVideoXPipeline
 
-        # ⚠️  T4 = Turing. bfloat16 is EMULATED → SLOW. Use float16.
-        log.info("cogvideox.loading", device=device, dtype="float16", int8=_USE_INT8)
-
-        pipe = CogVideoXPipeline.from_pretrained(
-            "THUDM/CogVideoX-2b",
-            torch_dtype=torch.float16,
-        )
-
-        if _USE_INT8:
-            try:
-                from torchao.quantization import quantize_, int8_weight_only
-                quantize_(pipe.transformer, int8_weight_only())
-                log.info("cogvideox.int8_quantized", device=device)
-            except Exception as e:
-                log.warning("cogvideox.int8_skip", error=str(e)[:100])
-
+        # ⚠️  T4 = Turing. bfloat16 is EMULATED → SLOW. Always use float16.
         gpu_id = int(device.split(":")[-1])
+
+        # ── Step 1: Load T5 with bitsandbytes NF4 ──────────────────────────
+        # Root-cause fix for persistent VRAM OOM on 15.6 GB T4:
+        #   T5 in float16 = 9.5 GB  →  heavily fragments VRAM post-offload
+        #                              Transformer activations can't find contiguous blocks
+        #   T5 in NF4 (bitsandbytes) = ~2.1 GB  → 7.4 GB saved, fragmentation gone
+        #
+        # WHY bitsandbytes and NOT torchao:
+        #   torchao wraps tensors as AffineQuantizedTensor (tensor-level).
+        #   accelerate's cpu_offload hooks call .to(device) on tensors → TypeError.
+        #
+        #   bitsandbytes replaces nn.Linear → bnb.Linear4bit (module-level).
+        #   accelerate's hooks move modules to/from GPU normally → full compatibility.
+        text_encoder = None
+        try:
+            from transformers import T5EncoderModel, BitsAndBytesConfig
+            log.info("cogvideox.t5_nf4_loading", device=device)
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+            text_encoder = T5EncoderModel.from_pretrained(
+                "THUDM/CogVideoX-2b",
+                subfolder="text_encoder",
+                quantization_config=bnb_config,
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+            )
+            log.info("cogvideox.t5_nf4_ready", device=device)
+        except Exception as e:
+            log.warning("cogvideox.t5_nf4_failed_using_float16", error=str(e)[:120])
+            text_encoder = None  # fall through to full float16 pipeline
+
+        # ── Step 2: Load full pipeline ──────────────────────────────────────
+        log.info("cogvideox.loading", device=device, dtype="float16",
+                 t5_nf4=(text_encoder is not None))
+
+        load_kwargs: dict = dict(torch_dtype=torch.float16, use_safetensors=True)
+        if text_encoder is not None:
+            load_kwargs["text_encoder"] = text_encoder
+
+        pipe = CogVideoXPipeline.from_pretrained("THUDM/CogVideoX-2b", **load_kwargs)
+
+        # ── Step 3: CPU offload (accelerate component-level hooks) ──────────
+        # Works correctly with bitsandbytes bnb.Linear4bit modules.
+        # Peak VRAM: T5 NF4 ~2.1 GB + Transformer ~4 GB + activations ~3 GB = ~9 GB
         if hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload(gpu_id=gpu_id)
         else:
             pipe.to(device)
 
-        for method in ("enable_vae_slicing", "enable_vae_tiling",
-                       "enable_attention_slicing"):
+        # ── Step 4: Memory-saving inference hooks ───────────────────────────
+        # attention_slicing(1) = one head at a time → max activation reduction
+        pipe.enable_attention_slicing(slice_size=1)
+        for method in ("enable_vae_slicing", "enable_vae_tiling"):
             if hasattr(pipe, method):
                 try:
                     getattr(pipe, method)()
@@ -165,8 +200,10 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
 
         _PIPES[key] = pipe
         used = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
-        log.info("cogvideox.ready", device=device, vram_gb=round(used, 1))
+        log.info("cogvideox.ready", device=device, vram_gb=round(used, 1),
+                 t5_mode="nf4" if text_encoder is not None else "float16")
         return pipe
+
 
 
 # ── LTX-Video loader ───────────────────────────────────────────────────────────
