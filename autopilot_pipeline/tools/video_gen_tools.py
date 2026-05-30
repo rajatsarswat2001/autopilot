@@ -180,23 +180,30 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
 
         pipe = CogVideoXPipeline.from_pretrained("THUDM/CogVideoX-2b", **load_kwargs)
 
-        # ── Step 3: CPU offload (accelerate component-level hooks) ──────────
-        # Works correctly with bitsandbytes bnb.Linear4bit modules.
-        # Peak VRAM: T5 NF4 ~2.1 GB + Transformer ~4 GB + activations ~3 GB = ~9 GB
-        if hasattr(pipe, "enable_model_cpu_offload"):
+        # ── Step 3: CPU offload ───────────────────────────────────────────────
+        # enable_model_cpu_offload loads the entire 4GB transformer to VRAM.
+        # enable_sequential_cpu_offload loads it layer-by-layer (saves ~3.8 GB VRAM)
+        if hasattr(pipe, "enable_sequential_cpu_offload"):
+            pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
+        elif hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload(gpu_id=gpu_id)
         else:
             pipe.to(device)
 
         # ── Step 4: Memory-saving inference hooks ───────────────────────────
-        # DO NOT use enable_attention_slicing! It disables PyTorch SDPA and causes
-        # a massive 13GB+ VRAM spike during the forward pass due to manual chunking.
-        for method in ("enable_vae_slicing", "enable_vae_tiling"):
-            if hasattr(pipe, method):
-                try:
-                    getattr(pipe, method)()
-                except Exception:
-                    pass
+        # We MUST use attention_slicing on T4. Without it, PyTorch SDPA falls back
+        # to math and tries to allocate 32 GiB! With sequential_cpu_offload, we have
+        # enough headroom (4GB freed) to survive the 3GB attention slice allocation.
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing(slice_size=1)
+            
+        if hasattr(pipe, "vae"):
+            for method in ("enable_slicing", "enable_tiling"):
+                if hasattr(pipe.vae, method):
+                    try:
+                        getattr(pipe.vae, method)()
+                    except Exception:
+                        pass
 
         _PIPES[key] = pipe
         used = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
