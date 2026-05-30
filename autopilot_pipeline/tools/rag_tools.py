@@ -26,7 +26,7 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-QDRANT_URL        = os.getenv("QDRANT_URL",        "http://localhost:6333")
+QDRANT_URL        = os.getenv("QDRANT_URL",        ":memory:")
 QDRANT_API_KEY    = os.getenv("QDRANT_API_KEY",    "")
 EMBED_MODEL       = os.getenv("EMBED_MODEL",       "sentence-transformers/all-MiniLM-L6-v2")
 VECTOR_DIM        = 384
