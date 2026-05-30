@@ -149,7 +149,11 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
             except Exception as e:
                 log.warning("cogvideox.int8_skip", error=str(e)[:100])
 
-        pipe.to(device)
+        gpu_id = int(device.split(":")[-1])
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
+        else:
+            pipe.to(device)
 
         for method in ("enable_vae_slicing", "enable_vae_tiling",
                        "enable_attention_slicing"):
@@ -196,7 +200,11 @@ def _load_ltx(device: str = "cuda:0") -> object:
                 torch_dtype=torch.bfloat16,
             )
 
-        pipe.to(device)
+        gpu_id = int(device.split(":")[-1])
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
+        else:
+            pipe.to(device)
 
         for method in ("enable_vae_slicing", "enable_attention_slicing"):
             if hasattr(pipe, method):
