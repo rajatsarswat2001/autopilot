@@ -35,8 +35,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Prevent PyTorch VRAM fragmentation (critical for Kaggle T4)
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# Prevent PyTorch VRAM fragmentation (critical for Kaggle T4).
+# NOTE: correct name is PYTORCH_CUDA_ALLOC_CONF (not PYTORCH_ALLOC_CONF).
+# The wrong name silently does nothing — this is a confirmed PyTorch naming quirk.
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Compatibility patch ───────────────────────────────────────────────────────
 # langchain-core internally reads langchain.debug for backwards compatibility.

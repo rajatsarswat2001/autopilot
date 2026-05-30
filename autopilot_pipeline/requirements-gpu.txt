@@ -6,11 +6,14 @@
 #
 # VRAM budget on Kaggle 2x T4 (15.6 GB each, 31.2 GB total):
 #   GPU 0 (cuda:0): Chatterbox TTS       ~2.0 GB  (cleared after each scene)
-#                   OR CogVideoX (mirror strategy)  ~6.5 GB
-#   GPU 1 (cuda:1): CogVideoX-2B INT8    ~6.5 GB  (primary video generator)
+#                   OR CogVideoX (mirror strategy)
+#   GPU 1 (cuda:1): CogVideoX-2B         ~9 GB peak (NF4 T5 + fp16 Transformer)
 #   ────────────────────────────────────────────────────────────────
-#   Peak cuda:0:  6.5 GB  (9.1 GB headroom)
-#   Peak cuda:1:  6.5 GB  (9.1 GB headroom)
+#   CogVideoX memory breakdown:
+#     T5 text encoder (NF4):   ~2.1 GB  (was 9.5 GB fp16 — saves 7.4 GB!)
+#     Transformer (fp16):      ~4.0 GB
+#     VAE + peak activations:  ~3.0 GB
+#     Total peak:              ~9 GB  ✓
 #
 # CRITICAL: T4 (Turing) does NOT natively support bfloat16 — it is emulated.
 #           All models loaded in torch.float16 for real T4 speed.
@@ -33,9 +36,11 @@ diffusers>=0.33.0
 # (Wan2.1 required 4.46.3 due to SDPA crash; CogVideoX has no such restriction)
 transformers>=4.40.0
 
-# INT8 quantization for CogVideoX-2B — drops VRAM from ~10 GB to ~6.5 GB
-# Install: pip install torchao
-torchao>=0.4.0
+# bitsandbytes: NF4 quantization of CogVideoX's T5 text encoder.
+# Shrinks T5 from 9.5 GB (fp16) to ~2.1 GB (NF4), eliminating VRAM fragmentation.
+# Module-level quantization (bnb.Linear4bit) — fully compatible with accelerate
+# cpu_offload hooks (unlike torchao which is tensor-level and breaks .to(device)).
+bitsandbytes>=0.43.0
 
 accelerate>=0.34.2           # fixed typo from 'accelearte'
 sentencepiece>=0.2.0         # tokenizer dependency

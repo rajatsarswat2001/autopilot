@@ -7,14 +7,16 @@ Replaces wan21_tools.py entirely.
 CRITICAL T4 INSIGHT: T4 (Turing) does NOT support bfloat16 natively.
 Using bfloat16 on T4 triggers slow emulated execution. Always use float16.
 
-Tier 1: CogVideoX-2B INT8  — primary, ~6-7 GB VRAM, 49 frames @ 8fps, Apache 2.0
-Tier 2: LTX-Video 0.9      — fast fallback, ~9 GB VRAM, 97 frames @ 24fps
+Tier 1: CogVideoX-2B  — primary, NF4 T5 + fp16 Transformer, ~9 GB VRAM peak
+         T5 quantized to NF4 via bitsandbytes (9.5 GB → 2.1 GB)
+         25 frames @ 8fps ≈ 3.1s per clip, Apache 2.0
+Tier 2: LTX-Video 0.9 — fast fallback, ~6–8 GB VRAM, 49 frames @ 24fps
 Tier 3: (caller falls through to Pollinations / placeholder)
 
 Strategy selection via VIDEO_GEN_STRATEGY env var:
-    mirror   (default) — CogVideoX on both GPUs, A+B clips in parallel (2x speed)
-    hybrid             — LTX-Video(cuda:0) + CogVideoX(cuda:1) simultaneously
-    sequential         — single GPU, one clip at a time (safe fallback)
+    mirror     — CogVideoX on both GPUs, A+B clips in parallel (2x speed)
+    hybrid     — LTX-Video(cuda:0) + CogVideoX(cuda:1) simultaneously
+    sequential — single GPU, one clip at a time (safe fallback)
 
 GPU Assignment (dual T4):
     cuda:0  → Chatterbox TTS during audio phase (~2 GB, cleared before visual)
@@ -23,7 +25,6 @@ GPU Assignment (dual T4):
 
 Environment variables:
     VIDEO_GEN_ENABLED      1/0  — master switch (default 1)
-    VIDEO_GEN_INT8         1/0  — CogVideoX INT8 quantization (default 1)
     VIDEO_GEN_STRATEGY     mirror|hybrid|sequential (default mirror)
     VIDEO_GEN_COG_STEPS    inference steps for CogVideoX (default 25)
     VIDEO_GEN_LTX_STEPS    inference steps for LTX-Video (default 8)
@@ -48,7 +49,6 @@ log = structlog.get_logger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 _ENABLED   = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
 _STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "mirror").lower()  # mirror|hybrid|sequential
-_USE_INT8  = os.getenv("VIDEO_GEN_INT8", "1").strip() != "0"
 _HF_TOKEN  = os.getenv("HF_TOKEN", "")
 _STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "25"))
 _STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "8"))
@@ -293,33 +293,52 @@ def _run_cogvideox(
     output_path: str,
     device: str,
     niche: str = "default",
+    seed: int = 42,
 ) -> Optional[str]:
     try:
         import torch
+        import gc
         pipe     = _load_cogvideox(device)
         enriched = _enrich(prompt, niche)
 
         log.info("cogvideox.generating", device=device,
                  steps=_STEPS_COG, prompt=enriched[:80])
 
-        with torch.inference_mode():
+        # generator on CPU is required when enable_model_cpu_offload is active.
+        # The offload hooks move weights between CPU/GPU layer-by-layer, so the
+        # "current" CUDA device at RNG time is non-deterministic. A GPU generator
+        # would crash or produce wrong outputs. CPU generator is device-agnostic.
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+
+        # torch.no_grad() required (not inference_mode).
+        # bitsandbytes NF4 dequantization creates internal tensor views (it unpacks
+        # 4-bit → FP16 on the fly). inference_mode disables view tracking, which
+        # breaks those operations silently. no_grad() is safe.
+        with torch.no_grad():
             result = pipe(
                 prompt=enriched,
                 negative_prompt=_NEGATIVE,
                 height=480,
                 width=720,
-                num_frames=25,        # reduced from 49 to 25 to fit in 16GB VRAM in FP16
+                num_frames=25,        # 25 frames @ 8fps ≈ 3.1s; fits 15.6 GB T4 in FP16
                 num_inference_steps=_STEPS_COG,
                 guidance_scale=6.0,
+                generator=generator,
             )
 
         return _frames_to_mp4(result.frames[0], output_path, fps=8)
 
     except Exception as e:
         log.error("cogvideox.failed", device=device, error=str(e)[:300])
+        # Clean up dirty VRAM before LTX fallback can attempt to load.
+        # Without this, fragmented post-OOM blocks cause LTX to also fail.
         try:
-            import torch
+            import torch, gc
+            if key := f"cog_{device.split(':')[-1]}":
+                _PIPES.pop(key, None)
+            gc.collect()
             torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
         except Exception:
             pass
         return None
@@ -333,20 +352,31 @@ def _run_ltx(
     niche: str = "default",
 ) -> Optional[str]:
     try:
-        import torch
+        import torch, gc
+        # Guard: check we have enough free VRAM before loading LTX.
+        # If we're here because CogVideoX OOMed, the GPU may still be dirty.
+        if torch.cuda.is_available():
+            free_vram_gb = torch.cuda.mem_get_info(device)[0] / 1024**3
+            if free_vram_gb < 6.0:
+                log.error("ltx.insufficient_vram_after_cogvideox_oom",
+                          device=device, free_gb=round(free_vram_gb, 1))
+                return None
+
         pipe     = _load_ltx(device)
         enriched = _enrich(prompt, niche)
 
         log.info("ltx.generating", device=device,
                  steps=_STEPS_LTX, prompt=enriched[:80])
 
-        with torch.inference_mode():
+        with torch.no_grad():
             result = pipe(
                 prompt=enriched,
                 negative_prompt=_NEGATIVE,
                 height=480,
                 width=704,
-                num_frames=97,        # 97 frames @ 24fps ≈ 4.0s
+                # Cap at 49 frames (not 97) when acting as fallback in degraded state.
+                # 97 frames risks OOM if VRAM is still dirty from CogVideoX attempt.
+                num_frames=49,
                 num_inference_steps=_STEPS_LTX,
                 guidance_scale=3.0,
             )
@@ -395,6 +425,20 @@ def _generate_pair(
 
     elif _STRATEGY == "hybrid" and n >= 2:
         # ── Hybrid: LTX(cuda:0) + CogVideoX(cuda:1) simultaneously ──────────
+        # RAM guard: combined CPU RAM for both offloaded pipelines is ~20-22 GB.
+        # Kaggle has 30 GB total. If free RAM is below 22 GB, fall through to
+        # sequential to avoid killing the kernel with an OOM.
+        try:
+            import psutil
+            free_ram_gb = psutil.virtual_memory().available / 1024**3
+            if free_ram_gb < 22:
+                log.warning("strategy.hybrid_ram_guard",
+                            free_gb=round(free_ram_gb, 1),
+                            action="downgrading to sequential")
+                raise RuntimeError("insufficient RAM for hybrid")
+        except ImportError:
+            pass  # psutil not installed — proceed optimistically
+
         log.info("strategy.hybrid")
         results: dict[str, Optional[str]] = {}
 
