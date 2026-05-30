@@ -5,35 +5,47 @@
 #   pip install -r requirements-gpu.txt
 #
 # VRAM budget on Kaggle 2x T4 (15.6 GB each, 31.2 GB total):
-#   GPU 0 (cuda:0): Chatterbox TTS    ~2 GB  (cleared after each scene)
-#   GPU 0 (cuda:0): Kokoro-82M        ~0.5 GB (fallback TTS)
-#   GPU 1 (cuda:1): Wan2.1 1.3B       ~8-9 GB bfloat16 + float32 VAE
-#   ────────────────────────
-#   GPU 1 peak usage   ~8-9 GB  (comfortable 6 GB safety margin)
-#   GPU 0 peak usage   ~2 GB    (13 GB free headroom)
-#   GPU 1 peak usage   ~9 GB  (6.6 GB free headroom)
-#   GPU 0 peak usage   ~3 GB  (12.6 GB free headroom)
+#   GPU 0 (cuda:0): Chatterbox TTS       ~2.0 GB  (cleared after each scene)
+#                   OR CogVideoX (mirror strategy)  ~6.5 GB
+#   GPU 1 (cuda:1): CogVideoX-2B INT8    ~6.5 GB  (primary video generator)
+#   ────────────────────────────────────────────────────────────────
+#   Peak cuda:0:  6.5 GB  (9.1 GB headroom)
+#   Peak cuda:1:  6.5 GB  (9.1 GB headroom)
+#
+# CRITICAL: T4 (Turing) does NOT natively support bfloat16 — it is emulated.
+#           All models loaded in torch.float16 for real T4 speed.
+#
+# VIDEO MODEL DISK USAGE (downloaded to Kaggle /root/.cache):
+#   CogVideoX-2B:   ~5 GB  (primary)
+#   LTX-Video:      ~9 GB  (fast fallback — loads ONLY if CogVideoX fails)
+#   Do NOT preload both simultaneously — Kaggle disk limit is ~57 GB.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── PyTorch (pre-installed on Kaggle — listed for local dev only) ──────────────
+# ── PyTorch (pre-installed on Kaggle — listed for local dev only) ───────────
 torch>=2.3.0
 torchaudio>=2.3.0
 
-# ── Diffusers (Wan2.1 video generation) ───────────────────────────────────────────────
-# WanPipeline was introduced in diffusers 0.33.0 (released Apr 9 2025).
-# Kaggle pre-installs 0.29.0 — kaggle_setup.py force-reinstalls to 0.34.0.
+# ── Diffusers (CogVideoX + LTX-Video generation) ────────────────────────────
+# CogVideoXPipeline requires diffusers 0.30+. LTXPipeline requires 0.32+.
 diffusers>=0.33.0
-# transformers pinned to 4.46.3: Chatterbox breaks on 5.x (SDPA attention crash)
-transformers==4.46.3
-accelerate>=0.34.2
-sentencepiece>=0.2.0              # required by Wan2.1 T5 tokenizer
-imageio>=2.34.0                   # frame export for Wan2.1
+
+# transformers: CogVideoX works on 4.x and 5.x — no strict pin needed.
+# (Wan2.1 required 4.46.3 due to SDPA crash; CogVideoX has no such restriction)
+transformers>=4.40.0
+
+# INT8 quantization for CogVideoX-2B — drops VRAM from ~10 GB to ~6.5 GB
+# Install: pip install torchao
+torchao>=0.4.0
+
+accelerate>=0.34.2           # fixed typo from 'accelearte'
+sentencepiece>=0.2.0         # tokenizer dependency
+imageio>=2.34.0              # frame export
 imageio-ffmpeg>=0.5.1
 
-# ── Chatterbox TTS (MIT, best free voice) ─────────────────────────────────────
+# ── Chatterbox TTS (MIT, best free voice) ───────────────────────────────────
 chatterbox-tts>=0.1.0
 
-# ── ACE-Step music generation (MIT, Suno-quality) ─────────────────────────────
+# ── ACE-Step music generation (MIT, Suno-quality) ───────────────────────────
 # Install from GitHub (pip package may lag behind releases):
 # pip install git+https://github.com/stepfun-ai/ACE-Step.git
 # Or if PyPI package is available:

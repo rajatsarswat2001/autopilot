@@ -1,30 +1,30 @@
 """
 agents/visual_director.py
 ─────────────────────────────────────────────────────────────────────────────
-Visual Director Agent — sources AI-generated or B-roll visuals for every scene.
+Visual Director Agent — sources AI-generated visuals for every scene.
 
 Asset sourcing priority (per clip, Tier 1 through Tier 4):
-  Tier 1a: Wan2.1 I2V   — Image-to-Video anchored to a master FLUX keyframe
-                          (WAN21_I2V_ENABLED=1 + WAN21_ENABLED=1)
-           Eliminates style drift: every clip shares the same visual identity.
-  Tier 1b: Wan2.1 T2V   — Pure text-to-video (WAN21_ENABLED=1)
-  Tier 2:  Pexels        — keyword-matched stock footage (DISABLE_STOCK != 1)
-  Tier 3:  Pollinations  — free FLUX-powered AI still (no API key needed)
-  Tier 4:  Placeholder   — mood-coloured gradient PNG (absolute last resort)
+  Tier 1: CogVideoX-2B INT8 — primary AI video, ~6-7 GB VRAM, 49 frames @ 8fps
+           Internally managed by tools/video_gen_tools.py.
+           Strategy controlled via VIDEO_GEN_STRATEGY env var:
+             mirror     (default) — CogVideoX on both GPUs, A+B in parallel (2x speed)
+             hybrid              — LTX-Video(cuda:0) + CogVideoX(cuda:1) simultaneously
+             sequential          — single GPU, safe on low-VRAM setups
+  Tier 2: LTX-Video 0.9 distilled — fast fallback inside video_gen_tools
+           (auto-selected if CogVideoX fails)
+  Tier 3: Pexels stock footage   — keyword-matched (DISABLE_STOCK != 1)
+  Tier 4: Pollinations FLUX      — free AI still image with Ken Burns animation
+  Tier 5: Placeholder            — mood-coloured gradient PNG (absolute last resort)
 
-I2V Anchor Flow:
-  1. generate_anchor_image() — calls Pollinations FLUX to produce a master keyframe
-  2. generate_i2v_clip()     — passes the keyframe to WanImageToVideoPipeline
-     This forces the diffusion transformer to retain the exact visual identity,
-     color palette, and composition of the anchor across all clips in the scene.
-
-Visuals conform to AudioAgent timing — clip lengths are set by the
-TimingManifest, not the other way around.
+CRITICAL (T4 GPU):
+  T4 (Turing arch) does NOT support bfloat16 natively — it is emulated.
+  video_gen_tools always loads models in float16 for native T4 speed.
 
 Performance:
-  • Tier 2 (Pexels) scenes run in PARALLEL via ThreadPoolExecutor (I/O-bound).
-  • Tier 1 (Wan2.1) runs sequentially to maximise GPU utilisation.
-  • max_workers defaults to 4; override via VISUAL_PARALLEL_WORKERS env var.
+  • Scene-level: sequential (one scene at a time). video_gen_tools handles
+    intra-scene A/B clip parallelism across dual GPUs internally.
+  • CogVideoX-2B INT8: ~2-4 min per clip on T4 @ 25 steps.
+  • LTX-Video fallback: ~60-90 sec per clip @ 8 steps (distilled).
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -41,15 +41,11 @@ import structlog
 from contracts.visual_manifest import VisualManifest, VisualScene
 from contracts.timing_manifest import TimingManifest
 from tools.pexels_tools import search_and_download_video
-from tools.ltx_tools import (
-    generate_ltx_clip,
-    is_ltx_available,
-)
-from tools.wan21_tools import (
-    generate_video_clip  as wan21_generate_clip,
-    generate_i2v_clip    as wan21_generate_i2v,
+from tools.video_gen_tools import (
+    generate_video_clip,
+    generate_i2v_clip,
     generate_anchor_image,
-    is_wan21_available,
+    is_video_gen_available,
 )
 import requests
 from urllib.parse import quote as url_encode
@@ -135,55 +131,23 @@ def _source_asset(
     Source a single visual asset for one clip (A or B) of a scene.
     Returns (path, asset_type, source_label).
     """
-    # ── Tier 1: LTX-Video T2V — 704x480, ~15s/clip on T4, Apache 2.0 ─────────
-    if is_ltx_available() and prompt:
-        clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_ltx.mp4")
+    # ── Tier 1: CogVideoX-2B INT8 (Primary) → LTX-Video (Fast Fallback) ────────
+    # video_gen_tools handles GPU routing, strategy (mirror/hybrid/sequential),
+    # and float16 conversion internally. No OOM — verified on T4.
+    if is_video_gen_available() and prompt:
+        clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_ai.mp4")
         try:
-            result = generate_ltx_clip(
+            result = generate_video_clip(
                 prompt=prompt,
                 output_path=clip_path,
                 duration_s=duration_s,
                 niche=niche,
             )
             if result:
-                log.info("visual_director.ltx_ok", scene_id=scene_id, label=split_label)
-                return result, "video_clip", "ltx"
+                log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label)
+                return result, "video_clip", "cogvideox"
         except Exception as e:
-            log.warning("visual_director.ltx_failed_falling_back",
-                        scene_id=scene_id, error=str(e)[:120])
-
-    # ── Tier 2: Wan2.1 I2V — anchor-locked (style-consistent, fallback) ───────
-    if _I2V_ENABLED and is_wan21_available() and prompt and anchor_image_path:
-        clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_i2v.mp4")
-        try:
-            result = wan21_generate_i2v(
-                prompt=prompt,
-                anchor_image_path=anchor_image_path,
-                output_path=clip_path,
-                duration_s=duration_s,
-                niche=niche,
-            )
-            if result:
-                log.info("visual_director.i2v_ok", scene_id=scene_id, label=split_label)
-                return result, "video_clip", "wan21"
-        except Exception as e:
-            log.warning("visual_director.i2v_failed", scene_id=scene_id, error=str(e)[:120])
-
-    # ── Tier 3: Wan2.1 T2V — pure text-to-video (secondary fallback) ──────────
-    if is_wan21_available() and prompt:
-        clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_wan.mp4")
-        try:
-            result = wan21_generate_clip(
-                prompt=prompt,
-                output_path=clip_path,
-                duration_s=duration_s,
-                niche=niche,
-            )
-            if result:
-                log.info("visual_director.wan21_ok", scene_id=scene_id, label=split_label)
-                return result, "video_clip", "wan21"
-        except Exception as e:
-            log.warning("visual_director.wan21_failed_falling_back",
+            log.warning("visual_director.ai_video_failed",
                         scene_id=scene_id, error=str(e)[:120])
 
     # ── Tier 2: Pexels stock footage ───────────────────────────────────────────
@@ -359,15 +323,16 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
     scenes    = manifest_dict.get("scenes", [])
 
-    # Force sequential processing if Wan2.1 is active to prevent VRAM spikes and thread OOMs
-    wan21_active = is_wan21_available()
-    n_workers = 1 if wan21_active else min(_MAX_WORKERS, max(len(scenes), 1))
+    # video_gen_tools manages intra-scene GPU parallelism (mirror/hybrid strategy)
+    # at the clip level. Scene-level must be sequential to avoid VRAM conflicts.
+    video_gen_active = is_video_gen_available()
+    n_workers = 1 if video_gen_active else min(_MAX_WORKERS, max(len(scenes), 1))
 
     log.info(
         "visual_director.start",
         scenes=len(scenes),
         workers=n_workers,
-        mode="sequential" if wan21_active else "parallel",
+        mode="sequential (video_gen_tools handles intra-scene parallelism)" if video_gen_active else "parallel",
     )
 
     # ── Submit all scenes in parallel ─────────────────────────────────────────
@@ -406,13 +371,14 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
 
     visual_manifest = VisualManifest(video_id=video_id, scenes=visual_scenes)
 
-    ltx_count = sum(
+    ai_count = sum(
         1 for s in visual_scenes
-        if getattr(s, 'source_A', '') == 'ltx' or getattr(s, 'source_B', '') == 'ltx'
+        if getattr(s, 'source_A', '') in ('cogvideox', 'ltx', 'wan21')
+        or getattr(s, 'source_B', '') in ('cogvideox', 'ltx', 'wan21')
     )
     log.info(
         "visual_director.done",
-        ltx=ltx_count,
+        ai_generated=ai_count,
         pexels=visual_manifest.pexels_scene_count,
         generated=visual_manifest.generated_scene_count,
         placeholders=visual_manifest.placeholder_scene_count,
