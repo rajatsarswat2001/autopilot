@@ -10,7 +10,7 @@ Research-backed version matrix (Kaggle T4, May 2026):
   torch          2.6.0+cu124   DO NOT reinstall
   numpy          1.26.4        pinned LAST after every other install
   transformers   4.46.3        downgraded from Kaggle 5.x (chatterbox requires)
-  diffusers      0.34.0        upgraded from Kaggle 0.29.0 (WanPipeline requires)
+  diffusers      0.33.0        upgraded from Kaggle 0.29.0 (WanPipeline requires, pinned below 0.34 to keep FromSingleFileMixin)
   accelerate     >=0.34.2
   langchain      >=1.0.0       1.x stack resolves cleanly on Kaggle Python 3.12
   langchain-community >=0.4.0
@@ -107,6 +107,7 @@ _run("utilities", _pip(
     "pydantic>=2.7.0,<3.0.0",
     "nest_asyncio>=1.6.0",
     "ftfy>=6.1.1",      # required by transformers CLIP tokenizer (Wan2.1 dep)
+    "qdrant-client>=1.9.0",
 ))
 
 # 2b. API clients (groq, openai, tavily — independent of langchain)
@@ -131,10 +132,10 @@ _run("langchain-community", _pip("langchain-community>=0.4.0"))
 _run("langgraph 1.x",      _pip("langgraph>=1.0.0"))
 
 # ============================================================================
-# STEP 3: GPU packages — upgrade diffusers from 0.29.0 to 0.34.0
+# STEP 3: GPU packages — upgrade diffusers from 0.29.0 to 0.33.0
 # Research finding: must pip uninstall first; otherwise pip sees 0.29 as "satisfied"
 # ============================================================================
-print("\n[3/7] GPU packages (upgrading diffusers 0.29 -> 0.34) ...")
+print("\n[3/7] GPU packages (upgrading diffusers 0.29 -> 0.33) ...")
 
 # Uninstall stale diffusers so pip doesn't skip the upgrade
 subprocess.run(
@@ -142,9 +143,9 @@ subprocess.run(
     capture_output=True, env=_ENV
 )
 
-# Install diffusers 0.34.0 without deps first (keeps torch safe)
-_run("diffusers==0.34.0 --no-deps",
-     _pip("diffusers==0.34.0", flags=["--no-deps"]))
+# Install diffusers 0.33.0 without deps first (keeps torch safe)
+_run("diffusers==0.33.0 --no-deps",
+     _pip("diffusers==0.33.0", flags=["--no-deps"]))
 
 # Now install diffusers' own deps (excludes torch which is pre-installed)
 _run("diffusers deps", _pip(
