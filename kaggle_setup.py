@@ -192,7 +192,10 @@ _run("kokoro>=0.9.4 + soundfile", _pip("kokoro>=0.9.4", "soundfile"), critical=F
 # Prevents falling back to generic SoundHelix MP3 tracks
 # ============================================================================
 print("  Installing ACE-Step music generator ...")
-_run("acestep>=0.1.0", _pip("acestep>=0.1.0"), critical=False)
+# ACE-Step is not on PyPI — install from GitHub source
+_run("acestep (GitHub)",
+     _pip("git+https://github.com/stepfun-ai/ACE-Step.git", flags=["--no-deps"]),
+     critical=False)
 
 # ============================================================================
 # STEP 5: FINAL numpy + scipy lock
@@ -244,7 +247,8 @@ CHECK_MODULES = [
     )),
     ("diffusers",     "diffusers",      lambda m: (
         f"OK  (diffusers {m.__version__}"
-        + (", LTXPipeline ✓" if hasattr(m, "LTXPipeline") else ", LTXPipeline ✗ — upgrade diffusers!")
+        + (", CogVideoXPipeline ✓" if hasattr(m, "CogVideoXPipeline") else ", CogVideoXPipeline ✗")
+        + (", LTXPipeline ✓" if hasattr(m, "LTXPipeline") else ", LTXPipeline ✗")
         + ")"
     )),
     ("transformers",  "transformers",   lambda m: m.__version__),
