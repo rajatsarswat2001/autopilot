@@ -189,8 +189,8 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
             pipe.to(device)
 
         # ── Step 4: Memory-saving inference hooks ───────────────────────────
-        # attention_slicing(1) = one head at a time → max activation reduction
-        pipe.enable_attention_slicing(slice_size=1)
+        # DO NOT use enable_attention_slicing! It disables PyTorch SDPA and causes
+        # a massive 13GB+ VRAM spike during the forward pass due to manual chunking.
         for method in ("enable_vae_slicing", "enable_vae_tiling"):
             if hasattr(pipe, method):
                 try:
