@@ -271,7 +271,7 @@ def _run_cogvideox(
                 negative_prompt=_NEGATIVE,
                 height=480,
                 width=720,
-                num_frames=49,        # fixed: 49 frames @ 8fps ≈ 6.1s
+                num_frames=25,        # reduced from 49 to 25 to fit in 16GB VRAM in FP16
                 num_inference_steps=_STEPS_COG,
                 guidance_scale=6.0,
             )
