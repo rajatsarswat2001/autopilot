@@ -222,6 +222,13 @@ def audio_node(state: PipelineState) -> dict[str, Any]:
         parallel=(not sequential),
     )
 
+    if tts_tier_used == "chatterbox":
+        try:
+            from tools.tts_tools import release_chatterbox
+            release_chatterbox()
+        except Exception as rel_err:
+            log.warning("audio_agent.chatterbox_release_failed", error=str(rel_err))
+
     updated_manifest = {**manifest_dict, "scenes": updated_scenes}
 
     return {

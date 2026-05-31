@@ -78,6 +78,26 @@ _CHATTERBOX_MODEL = None
 _KOKORO_PIPELINE = None
 
 
+def release_chatterbox() -> None:
+    """Release Chatterbox from cuda:0 after audio synthesis. Call before visual gen."""
+    global _CHATTERBOX_MODEL
+    if _CHATTERBOX_MODEL is None:
+        return
+    try:
+        del _CHATTERBOX_MODEL
+        _CHATTERBOX_MODEL = None
+        import gc, torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device="cuda:0")
+            torch.cuda.empty_cache()
+            free_gb = torch.cuda.mem_get_info("cuda:0")[0] / 1024 ** 3
+            log.info("tts.chatterbox_released",
+                     device="cuda:0", free_gb=round(free_gb, 2))
+    except Exception as e:
+        log.warning("tts.chatterbox_release_failed", error=str(e))
+
+
 def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0.5) -> None:
     global _CHATTERBOX_MODEL
     import torch

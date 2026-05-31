@@ -162,6 +162,7 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
                 quantization_config=bnb_config,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,
+                device_map={"": device},
             )
             log.info("cogvideox.t5_nf4_ready", device=device)
         except Exception as e:
@@ -195,6 +196,13 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
                         getattr(pipe.vae, method)()
                     except Exception:
                         pass
+
+        if hasattr(pipe, "transformer"):
+            try:
+                pipe.transformer = pipe.transformer.to(dtype=torch.float16)
+                log.info("cogvideox.transformer_cast_float16")
+            except Exception as t_err:
+                log.warning("cogvideox.transformer_cast_failed", error=str(t_err)[:80])
 
         # ── Step 3: CPU offload ───────────────────────────────────────────────
         if hasattr(pipe, "enable_model_cpu_offload"):
