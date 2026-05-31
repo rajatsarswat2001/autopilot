@@ -255,14 +255,15 @@ def _source_scene(
     prompt   = scene.get("visual_prompt_A", scene.get("narration", ""))
     keyword  = scene.get("b_roll_keyword_A", "abstract")
 
-    # Issue 6: Use CogVideoX as primary — sharper output, dual-GPU capable
-    clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_cogvideox.mp4")
+    # Anchor Image + I2V pipeline: better quality and coherent motion
+    clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_ltx_i2v.mp4")
+    anchor_path = str(out_dir / f"anchor_{scene_id:03d}.png")
     
-    path = generate_video_clip(
-        prompt=prompt,
-        output_path=clip_path,
-        niche=scene.get("niche", "default"),
-    )
+    anchor = generate_anchor_image(prompt=prompt, output_path=anchor_path, niche=scene.get("niche", "default"))
+    if anchor:
+        path = generate_i2v_clip(prompt=prompt, anchor_image_path=anchor, output_path=clip_path, niche=scene.get("niche", "default"))
+    else:
+        path = generate_video_clip(prompt=prompt, output_path=clip_path, niche=scene.get("niche", "default"))
 
     # Fallback: FLUX+SVD professional pipeline (requires ESRGAN for best quality)
     if not path:
@@ -331,17 +332,22 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
     scenes    = manifest_dict.get("scenes", [])
 
-    # video_gen_tools handles intra-scene GPU parallelism (mirror/hybrid strategy)
-    # at the clip level. Scene-level can run in parallel (up to 2 workers for 2 GPUs)
+    import gc
+    import torch
+    
+    # Clear VRAM after audio phase before any video generation begins
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     video_gen_active = is_video_gen_available()
-    # If video gen is active, we can use 2 workers (cuda:0 and cuda:1)
-    n_workers = min(2, len(scenes)) if video_gen_active else min(_MAX_WORKERS, max(len(scenes), 1))
+    n_workers = 1
 
     log.info(
         "visual_director.start",
         scenes=len(scenes),
         workers=n_workers,
-        mode="parallel (dual GPU)" if video_gen_active else "parallel",
+        mode="sequential (T2I -> I2V)",
     )
 
     # ── Submit all scenes in parallel ─────────────────────────────────────────

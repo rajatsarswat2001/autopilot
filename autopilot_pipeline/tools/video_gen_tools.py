@@ -54,7 +54,7 @@ _ENABLED   = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
 _STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "sequential").lower()  # mirror|hybrid|sequential
 _HF_TOKEN  = os.getenv("HF_TOKEN", "")
 _STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))   # higher = sharper frames
-_STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "24"))
+_STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "30"))
 
 # ── Kaggle detection ──────────────────────────────────────────────────────────
 # api-inference.huggingface.co is often blocked on Kaggle even when internet is
@@ -731,7 +731,7 @@ def generate_i2v_clip(
     from PIL import Image
 
     enriched  = _enrich(prompt, niche)
-    dev       = _video_device(0)   # I2V on cuda:0 (TTS is done by this point)
+    dev       = _video_device(1)   # I2V on cuda:1 with CPU offload
 
     pipe = _load_ltx_i2v(dev)
     if pipe is None:
