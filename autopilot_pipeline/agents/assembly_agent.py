@@ -1,16 +1,11 @@
 """
 agents/assembly_agent.py
-─────────────────────────────────────────────────────────────────────────────
-Assembly Agent — merges timing + visual manifests into a TimelineManifest,
-drives the renderer, and runs QA checks on the final video.
-
-Responsibilities:
-  1. Build TimelineManifest from TimingManifest + VisualManifest
-  2. Optionally add background music track
-  3. Invoke renderer/timeline_compiler → renderer/ffmpeg_builder
-  4. Run QA: duration check, resolution check, audio level check
-  5. Write final_video_path + thumbnail_path to state
-─────────────────────────────────────────────────────────────────────────────
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Assembly nodes — broken into 3 parts to isolate failures.
+1. timeline_node: builds manifests and captions
+2. render_node: executes FFmpeg
+3. qa_thumbnail_node: runs QA and makes thumbnail
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 from __future__ import annotations
 
@@ -47,15 +42,9 @@ QA_MIN_LUFS          = -70.0    # safety net: catches truly silent videos only
 QA_MAX_LUFS          = -6.0     # hard ceiling to avoid clipping
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# QA
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _qa_check(video_path: str, expected_duration_s: float) -> tuple[bool, str]:
-    """Run post-render QA. Returns (passed, notes)."""
     notes: list[str] = []
 
-    # Duration check
     actual_dur = measure_video_duration(video_path)
     if actual_dur < QA_MIN_DURATION_S:
         notes.append(f"Video too short: {actual_dur:.1f}s < {QA_MIN_DURATION_S}s minimum")
@@ -66,12 +55,10 @@ def _qa_check(video_path: str, expected_duration_s: float) -> tuple[bool, str]:
             f"(expected {expected_duration_s:.1f}s, got {actual_dur:.1f}s)"
         )
 
-    # Resolution check (warn only — Pexels clips may vary)
     resolution = get_video_resolution(video_path)
     if resolution and resolution not in ("1920x1080", "1080x1920", "1280x720"):
         log.warning("assembly_agent.resolution_mismatch", resolution=resolution)
 
-    # Loudness check
     lufs = measure_loudness_lufs(video_path)
     if lufs is not None:
         if lufs < QA_MIN_LUFS:
@@ -83,18 +70,7 @@ def _qa_check(video_path: str, expected_duration_s: float) -> tuple[bool, str]:
     return passed, " | ".join(notes) if notes else "All QA checks passed"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LangGraph node
-# ─────────────────────────────────────────────────────────────────────────────
-
-def assembly_node(state: PipelineState) -> dict[str, Any]:
-    """
-    Assembly Agent node.
-
-    Reads:  timing_manifest, visual_manifest, scene_manifest, video_id
-    Writes: timeline_manifest, final_video_path, thumbnail_path,
-            qa_passed, qa_notes, errors
-    """
+def timeline_node(state: PipelineState) -> dict[str, Any]:
     timing_dict  = state.get("timing_manifest")
     visual_dict  = state.get("visual_manifest")
     manifest_dict = state.get("scene_manifest", {})
@@ -102,21 +78,18 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
 
     if not timing_dict or not visual_dict:
         err: AgentError = {
-            "agent": "assembly",
+            "agent": "timeline",
             "error": "Missing timing_manifest or visual_manifest",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "recoverable": False,
         }
-        return {"errors": [err]}
+        return {"errors": [err], "job_status": "failed"}
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
     timing = TimingManifest(**timing_dict)
     visual = VisualManifest(**visual_dict)
-
     output_path = str(OUTPUT_DIR / f"{video_id}.mp4")
 
-    # ── Build TimelineManifest ────────────────────────────────────────────────
     timeline = TimelineManifest.from_manifests(
         video_id=video_id,
         output_path=output_path,
@@ -124,13 +97,11 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
         visual=visual,
     )
 
-    # Generate background music using ACE-Step 1.5 or fallback track
     mood = get_dominant_mood(manifest_dict)
-    video_id_for_music = video_id
     music_path = generate_background_music(
         mood=mood,
-        duration_s=timeline.total_duration_s + 5.0,  # slight overshoot, FFmpeg trims
-        video_id=video_id_for_music,
+        duration_s=timeline.total_duration_s + 5.0,
+        video_id=video_id,
     )
     if music_path:
         timeline.music_track = MusicTrack(
@@ -139,15 +110,9 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
             fade_in_s=2.0,
             fade_out_s=4.0,
         )
-        log.info("assembly_agent.music_ready", path=music_path, mood=mood)
-    else:
-        log.warning("assembly_agent.music_skipped")
+        log.info("timeline_node.music_ready", path=music_path, mood=mood)
 
-    log.info("assembly_agent.timeline_built",
-             clips=len(timeline.clips), duration=timeline.total_duration_s)
-
-    # ── Generate captions (ASS subtitle file) ─────────────────────────────────
-    niche = state.get("target_niche", "default")   # fixed: was "niche" (wrong key)
+    niche = state.get("target_niche", "default")
     caption_path = generate_captions(
         scene_manifest=manifest_dict,
         timing_manifest=timing_dict,
@@ -155,25 +120,50 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
         niche=niche,
         video_id=video_id,
     )
-    if caption_path:
-        log.info("assembly_agent.captions_ready", path=caption_path)
 
-    # ── Render ────────────────────────────────────────────────────────────────
+    return {
+        "timeline_manifest": timeline.model_dump(mode="json"),
+        "final_video_path":  output_path,
+        "caption_path":      caption_path, # Passed down to render
+        "job_status":        "render",
+    }
+
+
+def render_node(state: PipelineState) -> dict[str, Any]:
+    timeline_dict = state.get("timeline_manifest")
+    if not timeline_dict:
+        return {"job_status": "failed"}
+
+    timeline = TimelineManifest(**timeline_dict)
+    output_path = state.get("final_video_path")
+    caption_path = state.get("caption_path") # Requires state change
+
     try:
         compiled_plan = compile_timeline(timeline)
-        render_timeline(compiled_plan, output_path=output_path,
-                        caption_ass_path=caption_path)
+        render_timeline(compiled_plan, output_path=output_path, caption_ass_path=caption_path)
+        log.info("render_node.success", path=output_path)
+        return {"job_status": "qa_thumbnail"}
     except Exception as e:
         err = {
-            "agent": "assembly",
+            "agent": "render",
             "error": f"Render failed: {e}",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "recoverable": False,
         }
-        log.error("assembly_agent.render_failed", error=str(e))
-        return {"errors": [err]}
+        log.error("render_node.failed", error=str(e))
+        return {"errors": [err], "job_status": "failed"}
 
-    # ── Generate thumbnail ────────────────────────────────────────────────────
+
+def qa_thumbnail_node(state: PipelineState) -> dict[str, Any]:
+    output_path = state.get("final_video_path")
+    timeline_dict = state.get("timeline_manifest")
+    manifest_dict = state.get("scene_manifest", {})
+    niche = state.get("target_niche", "default")
+    video_id = state.get("video_id", str(uuid.uuid4()))
+
+    if not output_path or not timeline_dict:
+        return {"job_status": "failed"}
+
     thumb_path = str(OUTPUT_DIR / f"{video_id}_thumb.jpg")
     try:
         title = manifest_dict.get("title", "")
@@ -181,18 +171,16 @@ def assembly_node(state: PipelineState) -> dict[str, Any]:
         if result is None:
             thumb_path = None
     except Exception as e:
-        log.warning("assembly_agent.thumbnail_failed", error=str(e))
+        log.warning("qa_thumbnail_node.thumbnail_failed", error=str(e))
         thumb_path = None
 
-    # ── QA ────────────────────────────────────────────────────────────────────
-    qa_passed, qa_notes = _qa_check(output_path, timing.total_duration_s)
-    log.info("assembly_agent.qa", passed=qa_passed, notes=qa_notes)
+    timeline = TimelineManifest(**timeline_dict)
+    qa_passed, qa_notes = _qa_check(output_path, timeline.total_duration_s)
+    log.info("qa_thumbnail_node.qa", passed=qa_passed, notes=qa_notes)
 
     return {
-        "timeline_manifest": timeline.model_dump(mode="json"),
-        "final_video_path":  output_path,
-        "thumbnail_path":    thumb_path,
-        "qa_passed":         qa_passed,
-        "qa_notes":          qa_notes,
-        "job_status":        "upload" if qa_passed else "failed",
+        "thumbnail_path": thumb_path,
+        "qa_passed":      qa_passed,
+        "qa_notes":       qa_notes,
+        "job_status":     "seo" if qa_passed else "failed",
     }

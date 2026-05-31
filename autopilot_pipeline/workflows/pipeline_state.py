@@ -80,12 +80,20 @@ class PipelineState(TypedDict, total=False):
     # ── Phase: Title A/B ─────────────────────────────────────────────────────
     title_variants: list[dict]   # all scored title variants
 
+    # ── Phase: Visual QA ──────────────────────────────────────────────────────
+    visual_qa_passed: Optional[bool]
+    visual_qa_notes:  Optional[str]
+
     # ── Phase: Assembly ───────────────────────────────────────────────────────
     timeline_manifest: Optional[dict]   # TimelineManifest — full declarative render spec
     final_video_path:  Optional[str]    # absolute path to final MP4
+    caption_path:      Optional[str]    # absolute path to ASS subtitle file
     thumbnail_path:    Optional[str]    # absolute path to thumbnail PNG
     qa_passed:         Optional[bool]
     qa_notes:          Optional[str]
+
+    # ── Phase: SEO ────────────────────────────────────────────────────────────
+    seo_metadata:      Optional[dict]   # Generated SEO titles, description, tags, chapters
 
     # ── Phase: Upload ─────────────────────────────────────────────────────────
     youtube_video_id: Optional[str]

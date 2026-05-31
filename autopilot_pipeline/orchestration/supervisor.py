@@ -38,7 +38,9 @@ from agents.title_ab_agent import title_ab_node
 from agents.motion_agent import motion_node
 from agents.audio_agent import audio_node
 from agents.visual_director import visual_node
-from agents.assembly_agent import assembly_node
+from agents.visual_qa_agent import visual_qa_node
+from agents.assembly_agent import timeline_node, render_node, qa_thumbnail_node
+from agents.seo_agent import seo_node
 from agents.upload_agent import upload_node
 
 load_dotenv()
@@ -138,15 +140,39 @@ def route_after_audio(state: PipelineState) -> Literal["visual", "failed"]:
     return "visual"
 
 
-def route_after_visual(state: PipelineState) -> Literal["assembly", "failed"]:
+def route_after_visual(state: PipelineState) -> Literal["visual_qa", "failed"]:
     if _has_fatal_error(state, "visual_director"):
         return "failed"
-    return "assembly"
+    return "visual_qa"
 
 
-def route_after_assembly(state: PipelineState) -> Literal["upload", "failed"]:
+def route_after_visual_qa(state: PipelineState) -> Literal["timeline", "failed"]:
+    if not state.get("visual_qa_passed"):
+        return "failed"
+    return "timeline"
+
+
+def route_after_timeline(state: PipelineState) -> Literal["render", "failed"]:
+    if _has_fatal_error(state, "timeline"):
+        return "failed"
+    return "render"
+
+
+def route_after_render(state: PipelineState) -> Literal["qa_thumbnail", "failed"]:
+    if _has_fatal_error(state, "render"):
+        return "failed"
+    return "qa_thumbnail"
+
+
+def route_after_qa_thumbnail(state: PipelineState) -> Literal["seo", "failed"]:
     if not state.get("qa_passed"):
         log.error("route.qa_failed", notes=state.get("qa_notes"))
+        return "failed"
+    return "seo"
+
+
+def route_after_seo(state: PipelineState) -> Literal["upload", "failed"]:
+    if _has_fatal_error(state, "seo"):
         return "failed"
     return "upload"
 
@@ -230,7 +256,11 @@ def build_pipeline(checkpointer=None):
     g.add_node("human_review",  human_review_node)
     g.add_node("audio",         audio_node)
     g.add_node("visual",        visual_node)
-    g.add_node("assembly",      assembly_node)
+    g.add_node("visual_qa",     visual_qa_node)
+    g.add_node("timeline",      timeline_node)
+    g.add_node("render",        render_node)
+    g.add_node("qa_thumbnail",  qa_thumbnail_node)
+    g.add_node("seo",           seo_node)
     g.add_node("upload",        upload_node)
     g.add_node("success",       terminal_success_node)
     g.add_node("failed",        terminal_failure_node)
@@ -256,8 +286,16 @@ def build_pipeline(checkpointer=None):
     g.add_conditional_edges("audio",        route_after_audio,
                             {"visual": "visual", "failed": "failed"})
     g.add_conditional_edges("visual",       route_after_visual,
-                            {"assembly": "assembly", "failed": "failed"})
-    g.add_conditional_edges("assembly",     route_after_assembly,
+                            {"visual_qa": "visual_qa", "failed": "failed"})
+    g.add_conditional_edges("visual_qa",    route_after_visual_qa,
+                            {"timeline": "timeline", "failed": "failed"})
+    g.add_conditional_edges("timeline",     route_after_timeline,
+                            {"render": "render", "failed": "failed"})
+    g.add_conditional_edges("render",       route_after_render,
+                            {"qa_thumbnail": "qa_thumbnail", "failed": "failed"})
+    g.add_conditional_edges("qa_thumbnail", route_after_qa_thumbnail,
+                            {"seo": "seo", "failed": "failed"})
+    g.add_conditional_edges("seo",          route_after_seo,
                             {"upload": "upload", "failed": "failed"})
 
     # ── Terminal edges ───────────────────────────────────────────────────────
@@ -309,11 +347,15 @@ def make_initial_state(
         tts_tier_used=None,
         visual_scenes=[],
         visual_manifest=None,
+        visual_qa_passed=None,
+        visual_qa_notes=None,
         timeline_manifest=None,
         final_video_path=None,
+        caption_path=None,
         thumbnail_path=None,
         qa_passed=None,
         qa_notes=None,
+        seo_metadata=None,
         youtube_video_id=None,
         youtube_url=None,
         errors=[],
