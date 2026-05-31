@@ -221,11 +221,12 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
             except Exception as t_err:
                 log.warning("cogvideox.transformer_cast_failed", error=str(t_err)[:80])
 
-        # ── Step 3: CPU offload ───────────────────────────────────────────────
-        if hasattr(pipe, "enable_model_cpu_offload"):
-            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-        else:
-            pipe.to(device)
+        # ── Step 3: Device placement ───────────────────────────────────────────────
+        # We deliberately DO NOT use enable_model_cpu_offload() here.
+        # Running 2 concurrent pipelines with CPU offload consumes >24GB of System RAM
+        # and crashes Kaggle (30GB limit). With NF4 T5, the entire pipeline (~11GB)
+        # fits directly inside the 15.6GB VRAM of a single T4.
+        pipe.to(device)
 
         # ── Step 4: Memory-saving inference hooks ───────────────────────────
         if hasattr(pipe, "enable_attention_slicing"):
