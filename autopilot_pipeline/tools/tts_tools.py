@@ -54,8 +54,8 @@ _TONE_EXAGGERATION: dict[str, float] = {
     "hopeful":      0.60,
     "melancholic":  0.45,
     "warm":         0.50,
-    "authoritative":0.40,
-    "neutral":      0.35,
+    "authoritative":0.55,
+    "neutral":      0.50,
     "default":      0.50,
 }
 
@@ -98,10 +98,14 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
         _CHATTERBOX_MODEL = ChatterboxTTS.from_pretrained(device=device)
     model = _CHATTERBOX_MODEL
 
+    import re
+    # Add breath pauses after sentences
+    spaced_text = re.sub(r'([.!?])\s+', r'\1   ', text)
+
     wav = model.generate(
-        text=text,
+        text=spaced_text,
         exaggeration=emotion_exaggeration,
-        cfg_weight=0.5,
+        cfg_weight=0.3,
     )
 
     import torchaudio
@@ -113,9 +117,9 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
         tmp_path = tmp.name
     torchaudio.save(tmp_path, wav, model.sr)
 
-    # Slow down voice slightly (user request: atempo=0.92)
+    # Slow down voice slightly
     subprocess.run([
-        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.92", output_path
+        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.85", output_path
     ], check=True, capture_output=True)
     Path(tmp_path).unlink(missing_ok=True)
 
@@ -157,8 +161,22 @@ def _tts_kokoro(text: str, output_path: str) -> None:
     if not chunks:
         raise RuntimeError("Kokoro produced no audio chunks")
 
+    import tempfile
+    import subprocess
+    from pathlib import Path
+    
     combined = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
-    sf.write(output_path, combined, 24000)
+    
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    sf.write(tmp_path, combined, 24000)
+    
+    # Apply pace normalization for Kokoro
+    subprocess.run([
+        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.87", output_path
+    ], check=True, capture_output=True)
+    Path(tmp_path).unlink(missing_ok=True)
+    
     log.debug("tts.kokoro_ok", voice=KOKORO_VOICE, chars=len(text), path=output_path)
 
 
@@ -209,10 +227,10 @@ def _tts_edge(text: str, output_path: str) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp_path = tmp.name
         await communicate.save(tmp_path)
-        # Convert MP3 → WAV via ffmpeg
+        # Convert MP3 → WAV via ffmpeg and apply pace normalization
         import subprocess
         subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "24000", "-ac", "1", output_path],
+            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "24000", "-ac", "1", "-filter:a", "atempo=0.88", output_path],
             check=True, capture_output=True,
         )
         Path(tmp_path).unlink(missing_ok=True)
