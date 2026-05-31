@@ -59,6 +59,7 @@ RULES (non-negotiable):
    "welcome to", "don't forget to subscribe", "in this video".
 6. Each scene narration: 1–3 sentences, ≥ 10 words, conversational tone.
 7. Return ONLY valid JSON. No markdown fences, no preamble, no comments.
+8. Visual prompts MUST be highly detailed, photorealistic, and cinematic. Always specify camera angles (e.g., extreme close-up, drone shot), lighting (e.g., moody, golden hour, studio), specific environment details, and subject actions.
 """
 
 _SCHEMA = """\
@@ -72,10 +73,10 @@ _SCHEMA = """\
     {
       "scene_id": <int, start at 1, sequential>,
       "narration": "<1-3 sentences of voiceover, conversational tone>",
-      "visual_prompt_A": "<detailed image generation prompt for first half of sentence>",
+      "visual_prompt_A": "<highly detailed, photorealistic, cinematic image generation prompt including subject, action, environment, lighting, and camera angle>",
       "b_roll_keyword_A": "<2-4 word Pexels search query>",
-      "visual_prompt_B": "<detailed image generation prompt for second half of sentence>",
-      "b_roll_keyword_B": "<2-4 word Pexels search query>",
+      "visual_prompt_B": "<(Optional) secondary detailed visual prompt>",
+      "b_roll_keyword_B": "<(Optional) secondary Pexels search query>",
       "emotional_tone": "<tense|curious|inspiring|shocking|warm|neutral|dramatic>",
       "emotion_exaggeration": <0.0-1.0>
     }
