@@ -59,7 +59,7 @@ RULES (non-negotiable):
    "welcome to", "don't forget to subscribe", "in this video".
 6. Each scene narration: 1–3 sentences, ≥ 10 words, conversational tone.
 7. Return ONLY valid JSON. No markdown fences, no preamble, no comments.
-8. Visual prompts MUST be highly detailed, photorealistic, and cinematic. Always specify camera angles (e.g., extreme close-up, drone shot), lighting (e.g., moody, golden hour, studio), specific environment details, and subject actions.
+8. Visual prompts MUST be highly detailed, photorealistic, and cinematic. You MUST include explicit ACTION VERBS and motion descriptors (e.g., "walking rapidly", "gesturing with hands", "camera pans left", "water flowing"). Do not describe static scenes.
 """
 
 _SCHEMA = """\

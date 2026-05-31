@@ -92,6 +92,7 @@ _LOCKS: dict[str, threading.Lock] = {
 
 # ── Style tokens ───────────────────────────────────────────────────────────────
 _STYLE = "cinematic, anamorphic, 8K, photorealistic, masterful composition, no text"
+_MOTION = "dynamic motion, active movement, cinematic camera pan, temporal variation, fluid animation"
 _NICHE_TOKENS: dict[str, str] = {
     "personal_finance": "professional finance office, corporate aesthetic",
     "saas_tools":       "sleek tech workspace, dark UI glow",
@@ -112,7 +113,7 @@ _NEGATIVE = (
 def _enrich(prompt: str, niche: str = "default") -> str:
     prompt_trunc = prompt[:200]
     tokens = _NICHE_TOKENS.get(niche, _NICHE_TOKENS["default"])
-    return f"{prompt_trunc}, {tokens}, {_STYLE}"
+    return f"{prompt_trunc}, {tokens}, {_STYLE}, {_MOTION}"
 
 
 # ── Availability ───────────────────────────────────────────────────────────────
@@ -204,12 +205,14 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
                 log.info("cogvideox.vae_cast_float32")
             except Exception as vae_err:
                 log.warning("cogvideox.vae_cast_failed", error=str(vae_err)[:80])
-            for method in ("enable_slicing", "enable_tiling"):
-                if hasattr(pipe.vae, method):
-                    try:
-                        getattr(pipe.vae, method)()
-                    except Exception:
-                        pass
+
+        # Enable pipeline-level VAE slicing and tiling (fixes the System RAM / VRAM OOM during decode)
+        for method in ("enable_vae_slicing", "enable_vae_tiling"):
+            if hasattr(pipe, method):
+                try:
+                    getattr(pipe, method)()
+                except Exception:
+                    pass
 
         if hasattr(pipe, "transformer"):
             try:
