@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import asyncio
 import tempfile
+import threading
 from pathlib import Path
 from typing import Literal
 
@@ -287,19 +288,22 @@ def _tts_edge(text: str, output_path: str) -> None:
 # Tier 4: pyttsx3 (CPU, offline, always available)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_PYTTSX3_LOCK = threading.Lock()
+
 def _tts_pyttsx3(text: str, output_path: str) -> None:
     try:
         import pyttsx3
     except ImportError:
         raise ImportError("pyttsx3 not installed. Run: pip install pyttsx3")
 
-    engine = pyttsx3.init()
-    engine.setProperty("rate", PYTTSX3_RATE)
-    engine.setProperty("volume", 1.0)
+    with _PYTTSX3_LOCK:
+        engine = pyttsx3.init()
+        engine.setProperty("rate", PYTTSX3_RATE)
+        engine.setProperty("volume", 1.0)
 
-    # pyttsx3 can only save via save_to_file + runAndWait
-    engine.save_to_file(text, output_path)
-    engine.runAndWait()
+        # pyttsx3 can only save via save_to_file + runAndWait
+        engine.save_to_file(text, output_path)
+        engine.runAndWait()
     log.debug("tts.pyttsx3_ok", chars=len(text))
 
 

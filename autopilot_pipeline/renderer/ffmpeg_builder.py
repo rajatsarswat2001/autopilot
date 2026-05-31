@@ -229,8 +229,8 @@ def render_timeline(plan: RenderPlan, output_path: str | None = None,
 
         # ── Step 5: Burn captions (ASS) into video ───────────────────────────
         log.info("render.burning_captions", ass=caption_ass_path)
-        # Escape Windows backslashes for FFmpeg filter path
-        ass_escaped = caption_ass_path.replace("\\", "/").replace(":", "\\:")
+        # Escape Windows absolute paths for FFmpeg filtergraph (quadruple backslashes)
+        ass_escaped = caption_ass_path.replace("\\", "\\\\\\\\").replace(":", "\\\\:")
         try:
             subprocess.run(
                 [

@@ -55,6 +55,7 @@ _STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "sequential").lower()  # mirror|hyb
 _HF_TOKEN  = os.getenv("HF_TOKEN", "")
 _STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))   # higher = sharper frames
 _STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "30"))
+_STEPS_LTX_I2V = int(os.getenv("VIDEO_GEN_I2V_STEPS", "25"))
 
 # ── Kaggle detection ──────────────────────────────────────────────────────────
 # api-inference.huggingface.co is often blocked on Kaggle even when internet is
@@ -115,12 +116,30 @@ _NEGATIVE = (
 )
 
 def _enrich(prompt: str, niche: str = "default") -> str:
-    prompt_trunc = prompt[:200]
+    prompt_trunc = prompt[:400]
     tokens = _NICHE_TOKENS.get(niche, _NICHE_TOKENS["default"])
     return f"{prompt_trunc}, {tokens}, {_STYLE}, {_MOTION}"
 
 
 # ── Availability ───────────────────────────────────────────────────────────────
+def _evict_pipeline(key: str):
+    """Evict a pipeline and move its components to CPU to ensure VRAM release."""
+    pipe = _PIPES.pop(key, None)
+    if pipe is not None:
+        for attr in ("transformer", "text_encoder", "vae", "scheduler"):
+            component = getattr(pipe, attr, None)
+            if component is not None and hasattr(component, "to"):
+                try:
+                    component.to("cpu")
+                except Exception:
+                    pass
+        del pipe
+    import gc, torch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        
 def is_video_gen_available() -> bool:
     if not _ENABLED:
         return False
@@ -129,9 +148,6 @@ def is_video_gen_available() -> bool:
         return torch.cuda.is_available()
     except ImportError:
         return False
-
-# Backward-compat alias used by visual_director.py
-is_wan21_available = is_video_gen_available
 
 
 # ── CogVideoX-2B loader ────────────────────────────────────────────────────────
@@ -154,98 +170,65 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
             raise RuntimeError(f"Insufficient VRAM on {device}: {free_gb:.1f} GB free")
 
         from diffusers import CogVideoXPipeline
+        from diffusers.hooks import apply_group_offloading
+        import torch
 
-        # ⚠️  T4 = Turing. bfloat16 is EMULATED → SLOW. Always use float16.
         gpu_id = int(device.split(":")[-1])
 
-        # ── Step 1: Load T5 with bitsandbytes NF4 ──────────────────────────
-        # Root-cause fix for persistent VRAM OOM on 15.6 GB T4:
-        #   T5 in float16 = 9.5 GB  →  heavily fragments VRAM post-offload
-        #                              Transformer activations can't find contiguous blocks
-        #   T5 in NF4 (bitsandbytes) = ~2.1 GB  → 7.4 GB saved, fragmentation gone
-        #
-        # WHY bitsandbytes and NOT torchao:
-        #   torchao wraps tensors as AffineQuantizedTensor (tensor-level).
-        #   accelerate's cpu_offload hooks call .to(device) on tensors → TypeError.
-        #
-        #   bitsandbytes replaces nn.Linear → bnb.Linear4bit (module-level).
-        #   accelerate's hooks move modules to/from GPU normally → full compatibility.
-        text_encoder = None
-        try:
-            from transformers import T5EncoderModel, BitsAndBytesConfig
-            log.info("cogvideox.t5_nf4_loading", device=device)
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-            text_encoder = T5EncoderModel.from_pretrained(
-                "THUDM/CogVideoX-2b",
-                subfolder="text_encoder",
-                quantization_config=bnb_config,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-                device_map={"": device},
-            )
-            log.info("cogvideox.t5_nf4_ready", device=device)
-        except Exception as e:
-            log.warning("cogvideox.t5_nf4_failed_using_float16", error=str(e)[:120])
-            text_encoder = None  # fall through to full float16 pipeline
+        # ── Step 1: Load full pipeline in float16 ───────────────────────────
+        log.info("cogvideox.loading", device=device, dtype="float16")
 
-        # ── Step 2: Load full pipeline ──────────────────────────────────────
-        log.info("cogvideox.loading", device=device, dtype="float16",
-                 t5_nf4=(text_encoder is not None))
+        pipe = CogVideoXPipeline.from_pretrained(
+            "THUDM/CogVideoX-2b", 
+            torch_dtype=torch.float16,
+            use_safetensors=True
+        )
 
-        load_kwargs: dict = dict(torch_dtype=torch.float16, use_safetensors=True)
-        if text_encoder is not None:
-            load_kwargs["text_encoder"] = text_encoder
-
-        pipe = CogVideoXPipeline.from_pretrained("THUDM/CogVideoX-2b", **load_kwargs)
-
+        # ── Step 2: VAE optimizations ───────────────────────────────────────
         if hasattr(pipe, "vae"):
-            try:
-                # Keep VAE in float32 but patch the decode input to cast automatically
-                pipe.vae = pipe.vae.to(dtype=torch.float32)
-                # Patch forward to auto-cast input latents to float32
-                original_decode = pipe.vae.decode
-                def decode_fp32(z, *args, **kwargs):
-                    return original_decode(z.to(dtype=torch.float32), *args, **kwargs)
-                pipe.vae.decode = decode_fp32
-                log.info("cogvideox.vae_cast_float32_with_decode_patch")
-            except Exception as vae_err:
-                log.warning("cogvideox.vae_cast_failed", error=str(vae_err)[:80])
+            for method in ("enable_vae_slicing", "enable_vae_tiling"):
+                if hasattr(pipe.vae, method) or hasattr(pipe, method):
+                    try:
+                        getattr(pipe.vae if hasattr(pipe.vae, method) else pipe, method)()
+                    except Exception:
+                        pass
 
-        # Enable pipeline-level VAE slicing and tiling (fixes the System RAM / VRAM OOM during decode)
-        for method in ("enable_vae_slicing", "enable_vae_tiling"):
-            if hasattr(pipe, method):
-                try:
-                    getattr(pipe, method)()
-                except Exception:
-                    pass
+        # ── Step 3: Offloading (replaces NF4 hack) ──────────────────────────
+        onload = torch.device(device)
+        offload = torch.device("cpu")
 
         if hasattr(pipe, "transformer"):
-            try:
-                pipe.transformer = pipe.transformer.to(dtype=torch.float16)
-                log.info("cogvideox.transformer_cast_float16")
-            except Exception as t_err:
-                log.warning("cogvideox.transformer_cast_failed", error=str(t_err)[:80])
+            pipe.transformer.enable_group_offload(
+                onload_device=onload,
+                offload_device=offload,
+                offload_type="leaf_level",
+                use_stream=True,
+            )
+        if hasattr(pipe, "text_encoder"):
+            apply_group_offloading(
+                pipe.text_encoder,
+                onload_device=onload,
+                offload_type="block_level",
+                num_blocks_per_group=2,
+            )
+        if hasattr(pipe, "vae"):
+            apply_group_offloading(pipe.vae, onload_device=onload, offload_type="leaf_level")
 
-        # ── Step 3: Device placement ───────────────────────────────────────────────
-        # We deliberately DO NOT use enable_model_cpu_offload() here.
-        # Running 2 concurrent pipelines with CPU offload consumes >24GB of System RAM
-        # and crashes Kaggle (30GB limit). With NF4 T5, the entire pipeline (~11GB)
-        # fits directly inside the 15.6GB VRAM of a single T4.
-        pipe.to(device)
+        # Fallback layer-by-layer offload ONLY if single GPU strategy. 
+        # Incompatible with multi-GPU runs.
+        if _STRATEGY == "sequential":
+            if hasattr(pipe, "enable_model_cpu_offload"):
+                pipe.enable_model_cpu_offload(gpu_id=gpu_id)
+            if hasattr(pipe, "enable_sequential_cpu_offload"):
+                pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
+            log.info("cogvideox.sequential_cpu_offload_enabled")
 
-        # ── Step 4: Memory-saving inference hooks ───────────────────────────
         if hasattr(pipe, "enable_attention_slicing"):
             pipe.enable_attention_slicing(slice_size=1)
 
         _PIPES[key] = pipe
         used = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
-        log.info("cogvideox.ready", device=device, vram_gb=round(used, 1),
-                 t5_mode="nf4" if text_encoder is not None else "float16")
+        log.info("cogvideox.ready", device=device, vram_gb=round(used, 1), t5_mode="float16_offload")
         return pipe
 
 
@@ -264,6 +247,7 @@ def _load_ltx(device: str = "cuda:0") -> object:
             return _PIPES[key]
 
         import torch
+        from diffusers.hooks import apply_group_offloading
         try:
             from diffusers import LTXPipeline
         except ImportError:
@@ -272,38 +256,51 @@ def _load_ltx(device: str = "cuda:0") -> object:
 
         log.info("ltx.loading", device=device)
 
-        # Try float16 first (faster on T4); fall back to bfloat16 if weights require it
-        try:
-            pipe = LTXPipeline.from_pretrained(
-                "Lightricks/LTX-Video",
-                torch_dtype=torch.float16,
-            )
-        except Exception:
-            log.warning("ltx.fp16_load_failed_trying_bf16")
-            pipe = LTXPipeline.from_pretrained(
-                "Lightricks/LTX-Video",
-                torch_dtype=torch.bfloat16,
-            )
+        # ── Step 1: Load in float16 ─────────────────────────────────────────
+        pipe = LTXPipeline.from_pretrained(
+            "Lightricks/LTX-Video",
+            torch_dtype=torch.float16,
+        )
 
+        # ── Step 2: VAE optimizations (float32 decode patch + tiling) ───────
         if hasattr(pipe, "vae"):
             try:
                 pipe.vae = pipe.vae.to(dtype=torch.float32)
-                log.info("ltx.vae_cast_float32")
+                original_decode = pipe.vae.decode
+                def decode_fp32(z, *args, **kwargs):
+                    return original_decode(z.to(dtype=torch.float32), *args, **kwargs)
+                pipe.vae.decode = decode_fp32
+                log.info("ltx.vae_cast_float32_with_decode_patch")
             except Exception as vae_err:
                 log.warning("ltx.vae_cast_failed", error=str(vae_err)[:80])
 
-        gpu_id = int(device.split(":")[-1])
-        if hasattr(pipe, "enable_model_cpu_offload"):
-            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-        else:
-            pipe.to(device)
-
-        for method in ("enable_vae_slicing", "enable_attention_slicing"):
-            if hasattr(pipe, method):
+        for method in ("enable_vae_slicing", "enable_vae_tiling", "enable_attention_slicing"):
+            if hasattr(pipe, method) or hasattr(pipe.vae, method):
                 try:
-                    getattr(pipe, method)()
+                    getattr(pipe.vae if 'vae' in method else pipe, method)()
                 except Exception:
                     pass
+
+        # ── Step 3: Offloading ──────────────────────────────────────────────
+        onload = torch.device(device)
+        offload = torch.device("cpu")
+
+        if hasattr(pipe, "transformer"):
+            pipe.transformer.enable_group_offload(
+                onload_device=onload,
+                offload_device=offload,
+                offload_type="leaf_level",
+                use_stream=True,
+            )
+        if hasattr(pipe, "text_encoder"):
+            apply_group_offloading(
+                pipe.text_encoder,
+                onload_device=onload,
+                offload_type="block_level",
+                num_blocks_per_group=2,
+            )
+        if hasattr(pipe, "vae"):
+            apply_group_offloading(pipe.vae, onload_device=onload, offload_type="leaf_level")
 
         _PIPES[key] = pipe
         log.info("ltx.ready", device=device)
@@ -325,6 +322,7 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
             return _PIPES[key]
 
         import torch
+        from diffusers.hooks import apply_group_offloading
         
         free_gb = torch.cuda.mem_get_info(device)[0] / 1024**3
         if free_gb < 8.0:
@@ -336,22 +334,14 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
             return None
 
         log.info("ltx_i2v.loading", device=device)
-        try:
-            pipe = LTXImageToVideoPipeline.from_pretrained(
-                "Lightricks/LTX-Video",
-                torch_dtype=torch.float16,
-            )
-        except Exception as e:
-            log.warning("ltx_i2v.fp16_load_failed", error=str(e)[:80])
-            try:
-                pipe = LTXImageToVideoPipeline.from_pretrained(
-                    "Lightricks/LTX-Video",
-                    torch_dtype=torch.bfloat16,
-                )
-            except Exception as e2:
-                log.error("ltx_i2v.load_failed", error=str(e2)[:120])
-                return None
 
+        # ── Step 1: Load in float16 ─────────────────────────────────────────
+        pipe = LTXImageToVideoPipeline.from_pretrained(
+            "Lightricks/LTX-Video",
+            torch_dtype=torch.float16,
+        )
+
+        # ── Step 2: VAE optimizations (float32 decode patch + tiling) ───────
         if hasattr(pipe, "vae"):
             try:
                 pipe.vae = pipe.vae.to(dtype=torch.float32)
@@ -359,22 +349,37 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
                 def decode_fp32(z, *args, **kwargs):
                     return original_decode(z.to(dtype=torch.float32), *args, **kwargs)
                 pipe.vae.decode = decode_fp32
-                log.info("ltx_i2v.vae_cast_float32")
+                log.info("ltx_i2v.vae_cast_float32_with_decode_patch")
             except Exception as vae_err:
                 log.warning("ltx_i2v.vae_cast_failed", error=str(vae_err)[:80])
 
-        gpu_id = int(device.split(":")[-1])
-        if hasattr(pipe, "enable_model_cpu_offload"):
-            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-        else:
-            pipe.to(device)
-
-        for method in ("enable_vae_slicing", "enable_attention_slicing"):
-            if hasattr(pipe, method):
+        for method in ("enable_vae_slicing", "enable_vae_tiling", "enable_attention_slicing"):
+            if hasattr(pipe, method) or hasattr(pipe.vae, method):
                 try:
-                    getattr(pipe, method)()
+                    getattr(pipe.vae if 'vae' in method else pipe, method)()
                 except Exception:
                     pass
+
+        # ── Step 3: Offloading ──────────────────────────────────────────────
+        onload = torch.device(device)
+        offload = torch.device("cpu")
+
+        if hasattr(pipe, "transformer"):
+            pipe.transformer.enable_group_offload(
+                onload_device=onload,
+                offload_device=offload,
+                offload_type="leaf_level",
+                use_stream=True,
+            )
+        if hasattr(pipe, "text_encoder"):
+            apply_group_offloading(
+                pipe.text_encoder,
+                onload_device=onload,
+                offload_type="block_level",
+                num_blocks_per_group=2,
+            )
+        if hasattr(pipe, "vae"):
+            apply_group_offloading(pipe.vae, onload_device=onload, offload_type="leaf_level")
 
         _PIPES[key] = pipe
         log.info("ltx_i2v.ready", device=device)
@@ -651,6 +656,7 @@ def generate_video_clip(
         return result
 
     log.warning("video_gen.cogvideox_failed_trying_ltx")
+    _evict_pipeline(f"cog_{dev.split(':')[-1]}")
     return _run_ltx(prompt, output_path, device=dev, niche=niche)
 
 
@@ -668,6 +674,14 @@ def generate_anchor_image(
     """
     enriched = _enrich(prompt, niche)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Check cache first
+    anchor_hash = hashlib.md5(enriched.encode()).hexdigest()
+    cached_path = _ANCHOR_CACHE / f"anchor_{anchor_hash}.png"
+    if cached_path.exists() and cached_path.stat().st_size > 10_000:
+        shutil.copy2(cached_path, output_path)
+        log.info("anchor.cache_hit", path=output_path)
+        return output_path
 
     # ── Try HF Inference API (FLUX.1-schnell) ─────────────────────────────────
     if _HF_TOKEN:
@@ -691,6 +705,7 @@ def generate_anchor_image(
                 )
                 if resp.status_code == 200 and len(resp.content) > 10_000:
                     Path(output_path).write_bytes(resp.content)
+                    shutil.copy2(output_path, cached_path)
                     log.info("anchor.hf_flux_ok", path=output_path)
                     return output_path
                 log.warning("anchor.hf_flux_fail",
@@ -716,6 +731,7 @@ def generate_anchor_image(
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
             if Path(output_path).stat().st_size > 10_000:
+                shutil.copy2(output_path, cached_path)
                 log.info("anchor.pollinations_ok", path=output_path,
                          attempt=attempt)
                 return output_path
@@ -767,7 +783,7 @@ def generate_i2v_clip(
                 height=480,
                 width=704,
                 num_frames=97,
-                num_inference_steps=_STEPS_LTX,
+                num_inference_steps=_STEPS_LTX_I2V,
                 guidance_scale=5.0,
             )
 
@@ -778,10 +794,7 @@ def generate_i2v_clip(
 
     except Exception as e:
         log.error("ltx_i2v.failed", error=str(e)[:300])
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
+        _evict_pipeline(f"ltx_i2v_{dev.split(':')[-1]}")
         log.warning("video_gen.i2v_fallback_to_t2v_after_error")
         return generate_video_clip(prompt, output_path, duration_s, niche)
 

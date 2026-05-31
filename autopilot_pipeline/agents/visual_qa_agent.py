@@ -97,6 +97,16 @@ def visual_qa_node(state: PipelineState) -> dict[str, Any]:
             "job_status": "failed",
         }
 
+    # If every clip is a placeholder, hard fail
+    if len(warning_notes) == len(scenes) * 2:
+        notes = "All clips are placeholders."
+        log.warning("visual_qa.failed_all_placeholders")
+        return {
+            "visual_qa_passed": False,
+            "visual_qa_notes": notes,
+            "job_status": "failed",
+        }
+
     final_notes = "All clips passed QA."
     if warning_notes:
         final_notes = "Warnings: " + " | ".join(warning_notes)

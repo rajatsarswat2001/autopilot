@@ -219,7 +219,7 @@ def title_ab_node(state: PipelineState) -> dict[str, Any]:
             "ctr_score": score_title(orig_title),
         })
 
-    scored.sort(key=lambda x: x["ctr_score"], reverse=True)
+    scored.sort(key=lambda x: (x["ctr_score"], x["variant"] == "original"), reverse=True)
     winner = scored[0] if scored else None
 
     if winner and winner.get("variant") != "original":

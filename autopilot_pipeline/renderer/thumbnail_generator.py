@@ -121,7 +121,7 @@ def extract_frame(video_path: str, frame_output_path: str, timestamp: str = "00:
     ]
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return True
+        return Path(frame_output_path).exists() and Path(frame_output_path).stat().st_size > 1000
     except subprocess.CalledProcessError as e:
         err = e.stderr.decode(errors="ignore")
         log.warning("thumbnail.frame_extract_failed", error=err[:200])

@@ -61,17 +61,28 @@ class ClipCache:
     @staticmethod
     def key(visual_path: str, audio_path: str, duration_s: float) -> str:
         """Generate a deterministic cache key for a (visual, audio, duration) triple."""
-        # Use file size as a fast proxy for content hash
-        try:
-            if "|" in visual_path:
-                v_size = sum(Path(p).stat().st_size for p in visual_path.split("|") if Path(p).exists())
-            else:
-                v_size = Path(visual_path).stat().st_size
-            a_size = Path(audio_path).stat().st_size
-        except Exception:
-            v_size = a_size = 0
+        def file_hash(filepath: str) -> str:
+            h = hashlib.sha256()
+            try:
+                with open(filepath, 'rb') as f:
+                    # Read first 1MB and last 1MB to balance speed/correctness
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(0)
+                    if size <= 2 * 1024 * 1024:
+                        h.update(f.read())
+                    else:
+                        h.update(f.read(1024 * 1024))
+                        f.seek(-1024 * 1024, os.SEEK_END)
+                        h.update(f.read(1024 * 1024))
+                return h.hexdigest()
+            except Exception:
+                return "0"
 
-        raw = f"{visual_path}|{v_size}|{audio_path}|{a_size}|{duration_s:.3f}"
+        v_hash = file_hash(visual_path) if "|" not in visual_path else "|".join(file_hash(p) for p in visual_path.split("|"))
+        a_hash = file_hash(audio_path)
+
+        raw = f"{visual_path}|{v_hash}|{audio_path}|{a_hash}|{duration_s:.3f}"
         return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
     # ── Get / Put ─────────────────────────────────────────────────────────────

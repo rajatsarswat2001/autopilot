@@ -53,7 +53,6 @@ log = structlog.get_logger(__name__)
 MAX_SCRIPT_REVISIONS = 3
 MIN_UNIQUENESS_SCORE = 0.70
 MIN_ENTROPY_SCORE = 0.65
-MIN_COMPLIANCE_SCORE = 0.70
 POSTGRES_URI = os.getenv(
     "POSTGRES_URI", "postgresql://autopilot:autopilot@localhost:5432/autopilot"
 )

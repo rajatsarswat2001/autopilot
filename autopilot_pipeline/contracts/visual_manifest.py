@@ -58,7 +58,7 @@ class VisualManifest(BaseModel):
     @property
     def generated_scene_count(self) -> int:
         # "cogvideox" is the primary AI source label returned by video_gen_tools.py
-        _generated = {"cogvideox", "ltx", "wan21", "pollinations", "sdxl_nim", "sdxl_local", "replicate"}
+        _generated = {"cogvideox", "ltx", "ltx_i2v", "wan21", "pollinations", "sdxl_nim", "sdxl_local", "replicate"}
         return sum(1 for s in self.scenes if s.source_A in _generated or s.source_B in _generated)
 
     @property

@@ -182,5 +182,5 @@ def compliance_node(state: PipelineState) -> dict[str, Any]:
         "compliance_score":  {**scores, "overall": overall},
         "compliance_passed": passed,
         "compliance_issues": all_issues,
-        "job_status":        "human_review" if passed else "scripting",
+        "job_status":        "human_review" if passed else "script",
     }

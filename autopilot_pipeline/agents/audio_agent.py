@@ -25,7 +25,6 @@ Performance:
 from __future__ import annotations
 
 import os
-import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -43,7 +42,6 @@ log = structlog.get_logger(__name__)
 
 OUTPUT_DIR   = Path(os.getenv("AUDIO_OUTPUT_DIR", "outputs/audio")).resolve()
 _MAX_WORKERS = int(os.getenv("AUDIO_PARALLEL_WORKERS", "4"))
-_PYTTSX3_LOCK = threading.Lock()  # pyttsx3 is not thread-safe
 
 
 # ─────────────────────────────────────────────────────────────────────────────

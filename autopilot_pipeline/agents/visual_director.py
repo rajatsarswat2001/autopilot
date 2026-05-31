@@ -138,8 +138,9 @@ def _source_asset(
     if is_video_gen_available() and prompt:
         clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}_ai.mp4")
         try:
+            result = None
+            src = "cogvideox"
             if anchor_image_path:
-                # I2V: animate the FLUX anchor image — vastly superior to pure T2V
                 result = generate_i2v_clip(
                     prompt=prompt,
                     anchor_image_path=anchor_image_path,
@@ -147,15 +148,28 @@ def _source_asset(
                     duration_s=duration_s,
                     niche=niche,
                 )
-            else:
+                src = "ltx"
+            
+            if not result:
+                # Evict I2V pipeline to free VRAM before loading CogVideoX
+                from tools.video_gen_tools import _PIPES, _video_device
+                import gc, torch
+                key = f"ltx_i2v_{_video_device(1).split(':')[-1]}"
+                if key in _PIPES:
+                    del _PIPES[key]
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
                 result = generate_video_clip(
                     prompt=prompt,
                     output_path=clip_path,
                     duration_s=duration_s,
                     niche=niche,
                 )
+                src = "cogvideox"
+
             if result:
-                src = "ltx" if anchor_image_path else "cogvideox"
                 log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label, mode=src)
                 return result, "video_clip", src
         except Exception as e:
@@ -242,75 +256,49 @@ def _source_scene(
     scene_index: int,
     video_id: str,
     out_dir: Path,
+    timing_scenes: list[dict],
 ) -> VisualScene:
-    """
-    One AI video clip per scene via CogVideoX-2B.
-
-    CogVideoX is used as the primary pipeline (Issue 6 fix) since it produces
-    sharper, temporally coherent video and runs nicely on a single T4.
-    If it fails (e.g. OOM), it falls back to FLUX.1 + SVD.
-    """
     scene_id = scene["scene_id"]
     mood     = scene.get("emotional_tone", "neutral")
-    prompt   = scene.get("visual_prompt_A", scene.get("narration", ""))
-    keyword  = scene.get("b_roll_keyword_A", "abstract")
+    prompt_A = scene.get("visual_prompt_A", scene.get("narration", ""))
+    prompt_B = scene.get("visual_prompt_B", prompt_A)
+    keyword_A = scene.get("b_roll_keyword_A", "abstract")
+    keyword_B = scene.get("b_roll_keyword_B", keyword_A)
+    niche = scene.get("niche", "default")
 
-    # Anchor Image + I2V pipeline: better quality and coherent motion
-    clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_ltx_i2v.mp4")
-    anchor_path = str(out_dir / f"anchor_{scene_id:03d}.png")
-    
-    anchor = generate_anchor_image(prompt=prompt, output_path=anchor_path, niche=scene.get("niche", "default"))
-    path = None
-    if anchor:
-        path = generate_i2v_clip(prompt=prompt, anchor_image_path=anchor, output_path=clip_path, niche=scene.get("niche", "default"))
-    
-    if not path:
-        # Evict I2V pipeline to free VRAM before loading CogVideoX
-        from tools.video_gen_tools import _PIPES, _video_device
-        import gc, torch
-        key = f"ltx_i2v_{_video_device(1).split(':')[-1]}"
-        if key in _PIPES:
-            del _PIPES[key]
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-        path = generate_video_clip(prompt=prompt, output_path=clip_path, niche=scene.get("niche", "default"))
-
-    # Fallback: FLUX+SVD professional pipeline (requires ESRGAN for best quality)
-    if not path:
-        log.warning("visual_director.cogvideox_failed_trying_professional", scene_id=scene_id)
-        try:
-            from tools.video_gen_tools import generate_professional_clip
-            path = generate_professional_clip(
-                prompt=prompt,
-                output_path=clip_path,
-                niche=scene.get("niche", "default"),
-                scene_id=scene_id,
-                out_dir=out_dir,
-            )
-        except Exception as e:
-            log.warning("visual_director.professional_clip_failed", scene_id=scene_id, error=str(e)[:120])
-
-    if not path:
-        # Absolute last resort — placeholder
-        path = _make_placeholder(scene_id, mood, out_dir, "A")
-        asset_type, source = "placeholder", "placeholder"
-    else:
-        asset_type = "video_clip"
-        source     = "cogvideox"
+    # Extract duration from timing_manifest
+    timing = next((t for t in timing_scenes if t["scene_id"] == scene_id), {})
+    duration_s = timing.get("duration_s", 5.0)
 
     orientation = os.environ.get("FORMAT", "youtube").lower()
     width, height = (1080, 1920) if orientation in ("reel", "short") else (1920, 1080)
 
+    # Source A
+    anchor_path_A = str(out_dir / f"anchor_{scene_id:03d}_A.png")
+    anchor_A = generate_anchor_image(prompt=prompt_A, output_path=anchor_path_A, niche=niche)
+    path_A, type_A, source_A = _source_asset(
+        keyword=keyword_A, prompt=prompt_A, mood=mood, out_dir=out_dir,
+        video_id=video_id, scene_id=scene_id, split_label="A",
+        orientation=orientation, duration_s=duration_s, niche=niche, anchor_image_path=anchor_A,
+    )
+
+    # Source B
+    anchor_path_B = str(out_dir / f"anchor_{scene_id:03d}_B.png")
+    anchor_B = generate_anchor_image(prompt=prompt_B, output_path=anchor_path_B, niche=niche)
+    path_B, type_B, source_B = _source_asset(
+        keyword=keyword_B, prompt=prompt_B, mood=mood, out_dir=out_dir,
+        video_id=video_id, scene_id=scene_id, split_label="B",
+        orientation=orientation, duration_s=duration_s, niche=niche, anchor_image_path=anchor_B,
+    )
+
     return VisualScene(
         scene_id=scene_id,
-        asset_path_A=path,
-        asset_path_B=path,     # same clip for both A and B slots
-        asset_type_A=asset_type,
-        asset_type_B=asset_type,
-        source_A=source,
-        source_B=source,
+        asset_path_A=path_A,
+        asset_path_B=path_B,
+        asset_type_A=type_A,
+        asset_type_B=type_B,
+        source_A=source_A,
+        source_B=source_B,
         width=width,
         height=height,
         needs_ken_burns_A=False,
@@ -365,9 +353,12 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
     # ── Submit all scenes in parallel ─────────────────────────────────────────
     results: dict[int, VisualScene] = {}
 
+    timing_manifest = state.get("timing_manifest", {})
+    timing_scenes = timing_manifest.get("scenes", [])
+
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {
-            pool.submit(_source_scene, scene, i, video_id, VISUAL_DIR): scene["scene_id"]
+            pool.submit(_source_scene, scene, i, video_id, VISUAL_DIR, timing_scenes): scene["scene_id"]
             for i, scene in enumerate(scenes)
         }
         for future in as_completed(futures):
@@ -400,8 +391,8 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
 
     ai_count = sum(
         1 for s in visual_scenes
-        if getattr(s, 'source_A', '') in ('cogvideox', 'ltx', 'wan21')
-        or getattr(s, 'source_B', '') in ('cogvideox', 'ltx', 'wan21')
+        if getattr(s, 'source_A', '') in ('cogvideox', 'ltx', 'ltx_i2v', 'wan21')
+        or getattr(s, 'source_B', '') in ('cogvideox', 'ltx', 'ltx_i2v', 'wan21')
     )
     log.info(
         "visual_director.done",
