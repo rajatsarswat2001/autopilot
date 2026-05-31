@@ -731,3 +731,289 @@ def generate_i2v_clip(
             pass
         log.warning("video_gen.i2v_fallback_to_t2v_after_error")
         return generate_video_clip(prompt, output_path, duration_s, niche)
+
+# ── NEW: Professional Pipeline (FLUX + SVD + ESRGAN) ───────────────────────────
+
+_SVD_PIPE = None
+_SVD_LOCK = threading.Lock()
+
+def _load_svd(device: str = "cuda:0"):
+    """
+    Load Stable Video Diffusion XT (img2vid-xt).
+    ~7-8 GB active VRAM with CPU offload. Fits T4 comfortably.
+    Generates 25 frames at input image resolution (1024x576).
+    """
+    global _SVD_PIPE
+    if _SVD_PIPE is not None:
+        return _SVD_PIPE
+
+    with _SVD_LOCK:
+        if _SVD_PIPE is not None:
+            return _SVD_PIPE
+
+        from diffusers import StableVideoDiffusionPipeline
+        import torch
+        gpu_id = int(device.split(":")[-1])
+
+        log.info("svd.loading", device=device)
+        _SVD_PIPE = StableVideoDiffusionPipeline.from_pretrained(
+            "stabilityai/stable-video-diffusion-img2vid-xt",
+            torch_dtype=torch.float16,
+            variant="fp16",
+        )
+        # CPU offload keeps peak active VRAM at ~7-8 GB
+        _SVD_PIPE.enable_model_cpu_offload(gpu_id=gpu_id)
+
+        # VAE to float32 before registering offload hooks (same T4 fix as CogVideoX)
+        if hasattr(_SVD_PIPE, "vae"):
+            try:
+                _SVD_PIPE.vae = _SVD_PIPE.vae.to(dtype=torch.float32)
+                log.info("svd.vae_cast_float32")
+            except Exception as e:
+                log.warning("svd.vae_cast_failed", error=str(e)[:80])
+
+        log.info("svd.ready", device=device)
+        return _SVD_PIPE
+
+
+def _generate_flux_anchor(
+    prompt: str,
+    output_path: str,
+    width: int = 1024,
+    height: int = 576,
+    niche: str = "default",
+) -> Optional[str]:
+    """
+    Generate a high-quality anchor image via FLUX.1-schnell.
+    Uses HF Inference API (free with token).
+    Output: 1024x576 PNG — only 1.875x upscale to 1080p vs 4x for 480p AI video.
+    """
+    import requests
+    hf_token = os.getenv("HF_TOKEN", "")
+    enriched = _enrich(prompt, niche)
+
+    # Finance-specific negative — avoids faces, text, CGI
+    negative_style = (
+        "human faces, people, text, watermark, cartoon, anime, "
+        "low quality, blurry, overexposed, flat lighting, stock photo look"
+    )
+
+    if hf_token:
+        for attempt in range(3):
+            try:
+                if attempt > 0:
+                    time.sleep(3 * attempt)
+                resp = requests.post(
+                    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+                    headers={"Authorization": f"Bearer {hf_token}"},
+                    json={
+                        "inputs": enriched,
+                        "parameters": {
+                            "width": width,
+                            "height": height,
+                            "num_inference_steps": 4,
+                            "guidance_scale": 0.0,
+                        },
+                    },
+                    timeout=90,
+                )
+                if resp.status_code == 200 and len(resp.content) > 10_000:
+                    Path(output_path).write_bytes(resp.content)
+                    log.info("flux_anchor.hf_ok", path=output_path, attempt=attempt)
+                    return output_path
+                log.warning("flux_anchor.hf_status", status=resp.status_code, attempt=attempt)
+            except Exception as e:
+                log.warning("flux_anchor.hf_error", attempt=attempt, error=str(e)[:100])
+
+    # Fallback: Pollinations FLUX (no token needed)
+    from urllib.parse import quote as url_encode
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                time.sleep(5 * attempt)
+            encoded = url_encode(enriched)
+            url = (
+                f"https://image.pollinations.ai/prompt/{encoded}"
+                f"?width={width}&height={height}&nologo=true&model=flux&seed=42"
+            )
+            resp = requests.get(url, stream=True, timeout=90)
+            resp.raise_for_status()
+            with open(output_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            if Path(output_path).stat().st_size > 10_000:
+                log.info("flux_anchor.pollinations_ok", path=output_path, attempt=attempt)
+                return output_path
+        except Exception as e:
+            log.warning("flux_anchor.pollinations_failed", attempt=attempt, error=str(e)[:100])
+
+    log.error("flux_anchor.all_failed")
+    return None
+
+
+def _animate_with_svd(
+    anchor_path: str,
+    output_path: str,
+    num_frames: int = 25,
+    fps: int = 6,
+    motion_bucket_id: int = 100,   # 0-255: lower = less motion, 127 = default
+    noise_aug_strength: float = 0.02,
+    device: str = "cuda:0",
+) -> Optional[str]:
+    """
+    Animate a FLUX anchor image using Stable Video Diffusion.
+    """
+    import torch
+    from PIL import Image
+    try:
+        pipe = _load_svd(device)
+
+        image = Image.open(anchor_path).convert("RGB")
+        # SVD works best at 1024x576 (its training resolution)
+        image = image.resize((1024, 576), Image.LANCZOS)
+
+        log.info("svd.generating", frames=num_frames, fps=fps, motion_bucket=motion_bucket_id, anchor=anchor_path)
+
+        with torch.no_grad():
+            result = pipe(
+                image,
+                num_frames=num_frames,
+                num_inference_steps=25,     # 25 steps = good quality
+                fps=fps,
+                motion_bucket_id=motion_bucket_id,
+                noise_aug_strength=noise_aug_strength,
+                decode_chunk_size=8,        # decode 8 frames at a time (VRAM safe)
+            )
+
+        frames = result.frames[0]
+        return _frames_to_mp4(frames, output_path, fps)
+
+    except Exception as e:
+        log.error("svd.failed", error=str(e)[:300])
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return None
+
+
+def _upscale_video_realesrgan(
+    input_path: str,
+    output_path: str,
+    scale: int = 2,     # 2x: 1024x576 → 2048x1152, then crop to 1920x1080
+) -> Optional[str]:
+    """
+    Upscale video frames using Real-ESRGAN neural upscaler.
+    """
+    try:
+        from realesrgan import RealESRGANer
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+
+        model = RRDBNet(
+            num_in_ch=3, num_out_ch=3,
+            num_feat=64, num_block=23, num_grow_ch=32,
+            scale=scale
+        )
+        upsampler = RealESRGANer(
+            scale=scale,
+            model_path="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x2plus.pth",
+            model=model,
+            tile=512,           # process in tiles to avoid VRAM issues
+            tile_pad=10,
+            pre_pad=0,
+            half=True,          # float16 for speed
+            gpu_id=0,
+        )
+
+        # Extract frames, upscale each, re-encode
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frames_dir = Path(tmpdir) / "frames"
+            up_dir = Path(tmpdir) / "upscaled"
+            frames_dir.mkdir(); up_dir.mkdir()
+
+            # Extract frames
+            subprocess.run([
+                "ffmpeg", "-y", "-i", input_path,
+                str(frames_dir / "frame_%05d.png")
+            ], check=True, capture_output=True)
+
+            frame_files = sorted(frames_dir.glob("*.png"))
+            log.info("realesrgan.upscaling", frames=len(frame_files), scale=f"{scale}x")
+
+            for frame_path in frame_files:
+                import cv2, numpy as np
+                img = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+                upscaled, _ = upsampler.enhance(img, outscale=scale)
+                cv2.imwrite(str(up_dir / frame_path.name), upscaled)
+
+            # Re-encode: scale/crop to exact 1920x1080
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-framerate", "6",
+                "-i", str(up_dir / "frame_%05d.png"),
+                "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",       # higher quality
+                "-pix_fmt", "yuv420p",
+                output_path,
+            ], check=True, capture_output=True, timeout=300)
+
+        log.info("realesrgan.done", output=output_path)
+        return output_path
+
+    except ImportError:
+        log.warning("realesrgan.not_installed", hint="pip install realesrgan basicsr")
+        return None
+    except Exception as e:
+        log.error("realesrgan.failed", error=str(e)[:300])
+        return None
+
+
+def generate_professional_clip(
+    prompt: str,
+    output_path: str,
+    niche: str = "default",
+    scene_id: int = 1,
+    out_dir: Path = Path("outputs/visual"),
+) -> Optional[str]:
+    """
+    Primary visual generation path for professional finance content.
+
+    Pipeline:
+      1. FLUX.1-schnell anchor image
+      2. SVD I2V animation
+      3. Real-ESRGAN 2x upscale
+
+    Falls back to CogVideoX + bilinear if any step fails.
+    """
+    anchor_path = str(out_dir / f"anchor_{scene_id:03d}.png")
+    raw_video   = str(out_dir / f"raw_{scene_id:03d}.mp4")
+    upscaled    = str(out_dir / f"upscaled_{scene_id:03d}.mp4")
+
+    # Step 1: FLUX anchor image
+    anchor = _generate_flux_anchor(prompt, anchor_path, niche=niche)
+    if not anchor:
+        log.warning("professional_clip.flux_failed_cogvideox_fallback", scene_id=scene_id)
+        return generate_video_clip(prompt, output_path, 5.0, niche)
+
+    # Step 2: SVD animation
+    device = _video_device(0)   # SVD on cuda:0
+    raw = _animate_with_svd(anchor, raw_video, device=device)
+    if not raw:
+        log.warning("professional_clip.svd_failed_cogvideox_fallback", scene_id=scene_id)
+        return generate_video_clip(prompt, output_path, 5.0, niche)
+
+    # Step 3: Real-ESRGAN upscale
+    upscaled_path = _upscale_video_realesrgan(raw, upscaled)
+    if upscaled_path:
+        import shutil
+        shutil.copy2(upscaled_path, output_path)
+        log.info("professional_clip.done", scene_id=scene_id, path=output_path, pipeline="flux+svd+esrgan")
+        return output_path
+
+    # ESRGAN failed — use raw SVD output
+    log.warning("professional_clip.esrgan_failed_using_raw_svd")
+    import shutil
+    shutil.copy2(raw, output_path)
+    return output_path

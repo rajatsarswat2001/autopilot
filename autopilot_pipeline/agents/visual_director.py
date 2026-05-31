@@ -244,123 +244,52 @@ def _source_scene(
     out_dir: Path,
 ) -> VisualScene:
     """
-    Source all visual assets for a single scene.
-    When I2V mode is enabled, first generates a FLUX anchor image then
-    passes it into WanImageToVideoPipeline for both A and B clips.
+    One professional clip per scene. No A/B split.
+    Uses FLUX + SVD + ESRGAN pipeline.
     """
+    from tools.video_gen_tools import generate_professional_clip
+    
     scene_id = scene["scene_id"]
     mood     = scene.get("emotional_tone", "neutral")
-    motion_a = MOTION_CYCLE[(scene_index * 2) % len(MOTION_CYCLE)]
-    motion_b = MOTION_CYCLE[(scene_index * 2 + 1) % len(MOTION_CYCLE)]
+    niche    = os.environ.get("NICHE", "default")
+    prompt   = scene.get("visual_prompt_A", scene.get("narration", ""))
 
-    log.info("visual_director.scene", scene_id=scene_id, i2v=_I2V_ENABLED)
+    clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}.mp4")
 
-    orientation        = os.environ.get("FORMAT", "youtube").lower()
-    pexels_orientation = "portrait" if orientation in ("reel", "short") else "landscape"
-    niche              = os.environ.get("NICHE", "default")
+    log.info("visual_director.scene", scene_id=scene_id, prompt=prompt[:60])
 
-    # ── I2V: Generate master anchor image for this scene ───────────────────
-    # The anchor image locks the visual identity across A and B clips.
-    anchor_path: str | None = None
-    if _I2V_ENABLED and is_video_gen_available():
-        pr_a = scene.get("visual_prompt_A", "")
-        if pr_a:
-            anchor_out = str(out_dir / f"{video_id}_scene_{scene_id:03d}_anchor.png")
-            anchor_path = generate_anchor_image(
-                prompt=pr_a,
-                output_path=anchor_out,
-                niche=niche,
-            )
-            if anchor_path:
-                log.info("visual_director.anchor_ready",
-                         scene_id=scene_id, path=anchor_path)
-            else:
-                log.warning("visual_director.anchor_failed_continuing",
-                            scene_id=scene_id)
+    path = generate_professional_clip(
+        prompt=prompt,
+        output_path=clip_path,
+        niche=niche,
+        scene_id=scene_id,
+        out_dir=out_dir,
+    )
 
-    # ── Source A and B clips ──────────────────────────────────────────
-    path_a, type_a, src_a = None, None, None
-    path_b, type_b, src_b = None, None, None
+    if not path:
+        # Absolute last resort — placeholder
+        path = _make_placeholder(scene_id, mood, out_dir, "A")
+        asset_type, source = "placeholder", "placeholder"
+    else:
+        asset_type, source = "video_clip", "svd_flux"
 
-    kw_a = scene.get("b_roll_keyword_A", "")
-    pr_a = scene.get("visual_prompt_A", "")
-    kw_b = scene.get("b_roll_keyword_B", "")
-    pr_b = scene.get("visual_prompt_B", "")
-
-    # ── Dual-GPU parallel path ─────────────────────────────────────────
-    # I2V mode (anchor_path set): cuda:0 = LTX I2V, cuda:1 = CogVideoX T2V
-    # Pure T2V mode:              generate_video_pair handles dual-GPU internally
-    # Both paths run A+B simultaneously — no GPU sits idle.
-    if is_video_gen_available() and pr_a and pr_b:
-        out_a = str(out_dir / f"{video_id}_scene_{scene_id:03d}_A_ai.mp4")
-        out_b = str(out_dir / f"{video_id}_scene_{scene_id:03d}_B_ai.mp4")
-
-        try:
-            if anchor_path:
-                # ── I2V hybrid: cuda:0 = LTX I2V (clip A), cuda:1 = CogVideoX (clip B)
-                log.info("visual_director.dual_gpu_i2v", scene_id=scene_id)
-
-                def _run_i2v(prompt, anchor, out):
-                    return generate_i2v_clip(
-                        prompt=prompt, anchor_image_path=anchor,
-                        output_path=out, niche=niche,
-                    )
-
-                def _run_cog(prompt, out):
-                    from tools.video_gen_tools import _run_cogvideox
-                    return _run_cogvideox(prompt, out, device="cuda:1", niche=niche)
-
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    fut_a = pool.submit(_run_i2v, pr_a, anchor_path, out_a)
-                    fut_b = pool.submit(_run_cog, pr_b, out_b)
-                    
-                    try:
-                        res_a = fut_a.result()
-                    except Exception as e:
-                        log.warning("visual_director.cuda0_i2v_failed", error=str(e)[:120])
-                        res_a = None
-                        
-                    try:
-                        res_b = fut_b.result()
-                    except Exception as e:
-                        log.warning("visual_director.cuda1_cog_failed", error=str(e)[:120])
-                        res_b = None
-
-
-                if res_a:
-                    path_a, type_a, src_a = res_a, "video_clip", "cogvideox"
-                if res_b:
-                    path_b, type_b, src_b = res_b, "video_clip", "cogvideox"
-        except Exception as e:
-            log.warning("visual_director.pair_gen_failed", error=str(e)[:120])
-
-    if not path_a:
-        path_a, type_a, src_a = _source_asset(
-            kw_a, pr_a, mood, out_dir, video_id, scene_id, "A",
-            pexels_orientation, duration_s=5.0, niche=niche,
-            anchor_image_path=anchor_path,
-        )
-
-    if not path_b:
-        path_b, type_b, src_b = _source_asset(
-            kw_b, pr_b, mood, out_dir, video_id, scene_id, "B",
-            pexels_orientation, duration_s=5.0, niche=niche,
-            anchor_image_path=anchor_path,
-        )
-
+    orientation = os.environ.get("FORMAT", "youtube").lower()
     width, height = (1080, 1920) if orientation in ("reel", "short") else (1920, 1080)
 
     return VisualScene(
         scene_id=scene_id,
-        asset_path_A=path_a, asset_path_B=path_b,
-        asset_type_A=type_a, asset_type_B=type_b,
-        source_A=src_a, source_B=src_b,
+        asset_path_A=path,
+        asset_path_B=path,     # same clip for both A and B slots
+        asset_type_A=asset_type,
+        asset_type_B=asset_type,
+        source_A=source,
+        source_B=source,
         width=width,
         height=height,
-        needs_ken_burns_A=(type_a in ("image", "placeholder")),
-        needs_ken_burns_B=(type_b in ("image", "placeholder")),
-        motion_direction_A=motion_a if type_a in ("image", "placeholder") else None,
-        motion_direction_B=motion_b if type_b in ("image", "placeholder") else None,
+        needs_ken_burns_A=False,
+        needs_ken_burns_B=False,
+        motion_direction_A=None,
+        motion_direction_B=None,
     )
 
 
