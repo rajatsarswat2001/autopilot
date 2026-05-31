@@ -53,10 +53,10 @@ class Scene(BaseModel):
     )
     b_roll_keyword_A: str = Field(..., description="2–4 word Pexels search query for the first half")
     visual_prompt_B: str = Field(
-        ..., min_length=10,
+        default="",
         description="Detailed image/video generation prompt for the second half of the scene (A/B split)"
     )
-    b_roll_keyword_B: str = Field(..., description="2–4 word Pexels search query for the second half")
+    b_roll_keyword_B: str = Field(default="", description="2–4 word Pexels search query for the second half")
     emotional_tone: Literal["tense", "curious", "inspiring", "shocking", "warm", "neutral", "dramatic"] = "neutral"
 
     @field_validator("emotional_tone", mode="before")
@@ -131,7 +131,7 @@ class SceneManifest(BaseModel):
     @field_validator("title")
     @classmethod
     def reject_spam_title(cls, v: str) -> str:
-        if len(re.findall(r"\d+", v)) > 3:
+        if len(re.findall(r"\d+", v)) > 5:
             raise ValueError("Title contains too many numbers (spam signal)")
         return v
 
