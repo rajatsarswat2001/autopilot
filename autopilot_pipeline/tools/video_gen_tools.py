@@ -772,13 +772,7 @@ def _load_svd(device: str = "cuda:0"):
         # CPU offload keeps peak active VRAM at ~7-8 GB
         _SVD_PIPE.enable_model_cpu_offload(gpu_id=gpu_id)
 
-        # VAE to float32 before registering offload hooks (same T4 fix as CogVideoX)
-        if hasattr(_SVD_PIPE, "vae"):
-            try:
-                _SVD_PIPE.vae = _SVD_PIPE.vae.to(dtype=torch.float32)
-                log.info("svd.vae_cast_float32")
-            except Exception as e:
-                log.warning("svd.vae_cast_failed", error=str(e)[:80])
+        # (No VAE float32 cast needed for SVD on T4; it runs fine in fp16 without overflowing)
 
         log.info("svd.ready", device=device)
         return _SVD_PIPE
