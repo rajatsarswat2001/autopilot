@@ -77,22 +77,14 @@ _LOCKS: dict[str, threading.Lock] = {
 }
 
 # ── Style tokens ───────────────────────────────────────────────────────────────
-_STYLE = (
-    "ultra-realistic cinematic footage, 35mm anamorphic lens, "
-    "Arri Alexa color science, moody side-lighting, shallow depth of field, "
-    "film grain, teal and orange color grading, no text, no watermarks, photorealistic, "
-    "8K resolution, hyper-detailed, masterful composition"
-)
+_STYLE = "cinematic, anamorphic, 8K, photorealistic, masterful composition, no text"
 _NICHE_TOKENS: dict[str, str] = {
-    "personal_finance": (
-        "professional financial environment, sleek modern office, "
-        "warm tungsten lighting, premium corporate aesthetic, confident businessman"
-    ),
-    "saas_tools":    "sleek tech workspace, dark UI glow, blue accent lighting, developer at computer",
-    "legal_tax":     "professional legal office, polished mahogany desk, formal atmosphere, lawyer reviewing documents",
-    "senior_health": "warm golden hour lighting, serene natural setting, healthy active senior lifestyle",
-    "storytelling":  "epic wide establishing shot, dramatic rembrandt lighting, cinematic movie quality",
-    "default":       "professional environment, balanced natural lighting, sharp focus",
+    "personal_finance": "professional finance office, corporate aesthetic",
+    "saas_tools":       "sleek tech workspace, dark UI glow",
+    "legal_tax":        "formal legal office, polished mahogany",
+    "senior_health":    "warm golden hour, healthy senior lifestyle",
+    "storytelling":     "epic wide shot, dramatic rembrandt lighting",
+    "default":          "professional environment, sharp focus",
 }
 _NEGATIVE = (
     "black screen, dark screen, pure black, solid black, "
@@ -104,8 +96,9 @@ _NEGATIVE = (
 )
 
 def _enrich(prompt: str, niche: str = "default") -> str:
+    prompt_trunc = prompt[:200]
     tokens = _NICHE_TOKENS.get(niche, _NICHE_TOKENS["default"])
-    return f"{prompt}, {tokens}, {_STYLE}"
+    return f"{prompt_trunc}, {tokens}, {_STYLE}"
 
 
 # ── Availability ───────────────────────────────────────────────────────────────
@@ -185,28 +178,12 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
 
         pipe = CogVideoXPipeline.from_pretrained("THUDM/CogVideoX-2b", **load_kwargs)
 
-        # ── Step 3: CPU offload ───────────────────────────────────────────────
-        # enable_model_cpu_offload loads the entire 4GB transformer to VRAM.
-        # (Sequential offload crashes with bitsandbytes NF4 quantized layers)
-        if hasattr(pipe, "enable_model_cpu_offload"):
-            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-        else:
-            pipe.to(device)
-
-        # ── Step 4: Memory-saving inference hooks ───────────────────────────
-        # We MUST use attention_slicing on T4. Without it, PyTorch SDPA falls back
-        # to math and tries to allocate 32 GiB! With sequential_cpu_offload, we have
-        # enough headroom (4GB freed) to survive the 3GB attention slice allocation.
-        if hasattr(pipe, "enable_attention_slicing"):
-            pipe.enable_attention_slicing(slice_size=1)
-            
         if hasattr(pipe, "vae"):
-            # ── CRITICAL T4 FIX: Force VAE into float32 ──────────────────────
+            # ── CRITICAL T4 FIX: Force VAE into float32 BEFORE OFFLOAD ───────
             # Root cause of black screens: CogVideoX VAE decoder uses float16
             # during decode. On T4 GPUs, the large latent activations frequently
             # overflow float16's max range (65504), producing NaN → pitch-black frames.
-            # float32 has 3.4e38 max range — overflow is impossible.
-            # Cost: ~200 MB extra VRAM (negligible on 15.6 GB T4).
+            # Must happen before enable_model_cpu_offload so hooks capture the float32 cast!
             try:
                 pipe.vae = pipe.vae.to(dtype=torch.float32)
                 log.info("cogvideox.vae_cast_float32")
@@ -218,6 +195,16 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
                         getattr(pipe.vae, method)()
                     except Exception:
                         pass
+
+        # ── Step 3: CPU offload ───────────────────────────────────────────────
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
+        else:
+            pipe.to(device)
+
+        # ── Step 4: Memory-saving inference hooks ───────────────────────────
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing(slice_size=1)
 
         _PIPES[key] = pipe
         used = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
@@ -262,6 +249,13 @@ def _load_ltx(device: str = "cuda:0") -> object:
                 torch_dtype=torch.bfloat16,
             )
 
+        if hasattr(pipe, "vae"):
+            try:
+                pipe.vae = pipe.vae.to(dtype=torch.float32)
+                log.info("ltx.vae_cast_float32")
+            except Exception as vae_err:
+                log.warning("ltx.vae_cast_failed", error=str(vae_err)[:80])
+
         gpu_id = int(device.split(":")[-1])
         if hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload(gpu_id=gpu_id)
@@ -274,13 +268,6 @@ def _load_ltx(device: str = "cuda:0") -> object:
                     getattr(pipe, method)()
                 except Exception:
                     pass
-
-        if hasattr(pipe, "vae"):
-            try:
-                pipe.vae = pipe.vae.to(dtype=torch.float32)
-                log.info("ltx.vae_cast_float32")
-            except Exception as vae_err:
-                log.warning("ltx.vae_cast_failed", error=str(vae_err)[:80])
 
         _PIPES[key] = pipe
         log.info("ltx.ready", device=device)
@@ -325,6 +312,13 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
                 log.error("ltx_i2v.load_failed", error=str(e2)[:120])
                 return None
 
+        if hasattr(pipe, "vae"):
+            try:
+                pipe.vae = pipe.vae.to(dtype=torch.float32)
+                log.info("ltx_i2v.vae_cast_float32")
+            except Exception as vae_err:
+                log.warning("ltx_i2v.vae_cast_failed", error=str(vae_err)[:80])
+
         gpu_id = int(device.split(":")[-1])
         if hasattr(pipe, "enable_model_cpu_offload"):
             pipe.enable_model_cpu_offload(gpu_id=gpu_id)
@@ -337,13 +331,6 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
                     getattr(pipe, method)()
                 except Exception:
                     pass
-
-        if hasattr(pipe, "vae"):
-            try:
-                pipe.vae = pipe.vae.to(dtype=torch.float32)
-                log.info("ltx_i2v.vae_cast_float32")
-            except Exception as vae_err:
-                log.warning("ltx_i2v.vae_cast_failed", error=str(vae_err)[:80])
 
         _PIPES[key] = pipe
         log.info("ltx_i2v.ready", device=device)

@@ -45,7 +45,7 @@ _BASE_STYLES: dict[str, dict] = {
         "highlight":  "&H0000FFFF",   # yellow highlight (active word)
         "shadow":     "&H00000000",   # black shadow
         "back_colour":"&H99000000",   # semi-transparent black box
-        "fontnames":  ["Arial", "Impact", "Montserrat"],
+        "fontnames":  ["LiberationSans-Bold", "Liberation Sans", "DejaVuSans-Bold", "DejaVu Sans"],
         "fontsize":   68,
         "bold":       "1",
         "margin_v":   80,
@@ -55,7 +55,7 @@ _BASE_STYLES: dict[str, dict] = {
         "highlight":  "&H00FFFF00",   # cyan highlight
         "shadow":     "&H00000000",
         "back_colour":"&H99000000",
-        "fontnames":  ["Arial", "Roboto", "Montserrat"],
+        "fontnames":  ["LiberationSans-Bold", "Liberation Sans", "DejaVuSans-Bold", "DejaVu Sans"],
         "fontsize":   66,
         "bold":       "1",
         "margin_v":   80,
@@ -65,7 +65,7 @@ _BASE_STYLES: dict[str, dict] = {
         "highlight":  "&H0000D7FF",   # gold highlight
         "shadow":     "&H00000000",
         "back_colour":"&H99000000",
-        "fontnames":  ["Arial", "Georgia", "Montserrat"],
+        "fontnames":  ["LiberationSans-Bold", "Liberation Sans", "DejaVuSans-Bold", "DejaVu Sans"],
         "fontsize":   64,
         "bold":       "1",
         "margin_v":   80,
@@ -75,7 +75,7 @@ _BASE_STYLES: dict[str, dict] = {
         "highlight":  "&H0000FF7F",   # green highlight
         "shadow":     "&H00000000",
         "back_colour":"&H99000000",
-        "fontnames":  ["Arial", "Verdana"],  # max legibility
+        "fontnames":  ["LiberationSans-Bold", "Liberation Sans", "DejaVuSans-Bold", "DejaVu Sans"],
         "fontsize":   72,           # larger for senior audience
         "bold":       "1",
         "margin_v":   100,
@@ -85,7 +85,7 @@ _BASE_STYLES: dict[str, dict] = {
         "highlight":  "&H000080FF",   # orange highlight
         "shadow":     "&H00000000",
         "back_colour":"&H99000000",
-        "fontnames":  ["Arial", "Impact", "Oswald"],
+        "fontnames":  ["LiberationSans-Bold", "Liberation Sans", "DejaVuSans-Bold", "DejaVu Sans"],
         "fontsize":   68,
         "bold":       "1",
         "margin_v":   80,
@@ -95,7 +95,7 @@ _BASE_STYLES: dict[str, dict] = {
         "highlight":  "&H0000FFFF",   # yellow
         "shadow":     "&H00000000",
         "back_colour":"&H99000000",
-        "fontnames":  ["Arial", "Impact", "Montserrat"],
+        "fontnames":  ["LiberationSans-Bold", "Liberation Sans", "DejaVuSans-Bold", "DejaVu Sans"],
         "fontsize":   68,
         "bold":       "1",
         "margin_v":   80,
@@ -294,20 +294,37 @@ def build_word_timings(
         if duration <= 0:
             duration = len(words) / _DEFAULT_WPS
 
-        time_per_word = min(_MAX_WORD_S, max(_MIN_WORD_S, duration / len(words)))
-        actual_total  = time_per_word * len(words)
-        scale         = duration / actual_total if actual_total > 0 else 1.0
-        time_per_word *= scale
+        total_chars = sum(len(w) for w in words)
+        char_duration = duration / total_chars if total_chars > 0 else 0
+
+        word_durations = []
+        for w in words:
+            # Proportional time based on word length
+            w_dur = char_duration * len(w)
+            w_dur = min(_MAX_WORD_S, max(_MIN_WORD_S, w_dur))
+            word_durations.append(w_dur)
+
+        actual_total = sum(word_durations)
+        scale = duration / actual_total if actual_total > 0 else 1.0
+        word_durations = [d * scale for d in word_durations]
 
         groups = _split_into_groups(words, _WORDS_PER_LINE)
         word_idx = 0
+        scene_cursor = cursor
 
         for group in groups:
-            group_start = cursor + word_idx * time_per_word
+            group_start = scene_cursor
+            
+            # First pass to find group end
+            group_dur = sum(word_durations[word_idx + k] for k in range(len(group)))
+            group_end = group_start + group_dur
+            
             for j, word in enumerate(group):
-                w_start = cursor + word_idx * time_per_word
-                w_end   = w_start + time_per_word
+                w_dur = word_durations[word_idx]
+                w_start = scene_cursor
+                w_end = w_start + w_dur
                 is_last = (j == len(group) - 1)
+                
                 timings.append({
                     "start":            w_start,
                     "end":              w_end,
@@ -315,10 +332,11 @@ def build_word_timings(
                     "scene_id":         scene_id,
                     "group":            group,
                     "group_start":      group_start,
-                    "group_end":        group_start + len(group) * time_per_word,
+                    "group_end":        group_end,
                     "word_idx_in_group": j,
                     "is_last_in_group": is_last,
                 })
+                scene_cursor += w_dur
                 word_idx += 1
 
         cursor += duration

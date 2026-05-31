@@ -155,7 +155,7 @@ def _source_asset(
                     niche=niche,
                 )
             if result:
-                src = "ltx_i2v" if anchor_image_path else "cogvideox"
+                src = "ltx" if anchor_image_path else "cogvideox"
                 log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label, mode=src)
                 return result, "video_clip", src
         except Exception as e:
@@ -313,8 +313,19 @@ def _source_scene(
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     fut_a = pool.submit(_run_i2v, pr_a, anchor_path, out_a)
                     fut_b = pool.submit(_run_cog, pr_b, out_b)
-                    res_a = fut_a.result()
-                    res_b = fut_b.result()
+                    
+                    try:
+                        res_a = fut_a.result()
+                    except Exception as e:
+                        log.warning("visual_director.cuda0_i2v_failed", error=str(e)[:120])
+                        res_a = None
+                        
+                    try:
+                        res_b = fut_b.result()
+                    except Exception as e:
+                        log.warning("visual_director.cuda1_cog_failed", error=str(e)[:120])
+                        res_b = None
+
 
                 if res_a:
                     path_a, type_a, src_a = res_a, "video_clip", "cogvideox"
