@@ -148,6 +148,11 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
             return _PIPES[key]
 
         import torch
+        
+        free_gb = torch.cuda.mem_get_info(device)[0] / 1024**3
+        if free_gb < 8.0:
+            raise RuntimeError(f"Insufficient VRAM on {device}: {free_gb:.1f} GB free")
+
         from diffusers import CogVideoXPipeline
 
         # ⚠️  T4 = Turing. bfloat16 is EMULATED → SLOW. Always use float16.
@@ -320,6 +325,10 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
             return _PIPES[key]
 
         import torch
+        
+        free_gb = torch.cuda.mem_get_info(device)[0] / 1024**3
+        if free_gb < 8.0:
+            raise RuntimeError(f"Insufficient VRAM on {device}: {free_gb:.1f} GB free")
         try:
             from diffusers import LTXImageToVideoPipeline
         except ImportError:
@@ -346,6 +355,10 @@ def _load_ltx_i2v(device: str = "cuda:0") -> object:
         if hasattr(pipe, "vae"):
             try:
                 pipe.vae = pipe.vae.to(dtype=torch.float32)
+                original_decode = pipe.vae.decode
+                def decode_fp32(z, *args, **kwargs):
+                    return original_decode(z.to(dtype=torch.float32), *args, **kwargs)
+                pipe.vae.decode = decode_fp32
                 log.info("ltx_i2v.vae_cast_float32")
             except Exception as vae_err:
                 log.warning("ltx_i2v.vae_cast_failed", error=str(vae_err)[:80])

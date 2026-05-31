@@ -49,23 +49,35 @@ def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: f
     quality loss from multiple lossy re-encodes in the pipeline.
     """
     vf_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1"
+    
+    suffix = Path(visual_path).suffix.lower()
+    is_image = suffix in ('.png', '.jpg', '.jpeg')
+    
+    cmd = ["ffmpeg", "-y"]
+    if is_image:
+        cmd.extend(["-loop", "1"])
+        
+    cmd.extend([
+        "-i",  visual_path,
+        "-i",  audio_path,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-vf",  vf_filter,
+        "-t",   str(duration_s),
+        "-c:v", "libx264",
+        "-preset", "ultrafast",   # lossless intermediate — fast + no quality loss
+        "-crf",    "0",           # lossless; final output applies normal CRF via loudnorm step
+        "-c:a",    "aac",
+        "-b:a",    FFMPEG_AUDIO_BR,
+    ])
+    
+    if not is_image:
+        cmd.append("-shortest")
+        
+    cmd.append(output_path)
+    
     subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-i",  visual_path,
-            "-i",  audio_path,
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-vf",  vf_filter,
-            "-t",   str(duration_s),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",   # Issue 10: lossless intermediate — fast + no quality loss
-            "-crf",    "0",           # lossless; final output applies normal CRF via loudnorm step
-            "-c:a",    "aac",
-            "-b:a",    FFMPEG_AUDIO_BR,
-            "-shortest",
-            output_path,
-        ],
+        cmd,
         check=True, capture_output=True, timeout=300,
     )
     return output_path

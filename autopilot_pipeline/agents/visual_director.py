@@ -260,9 +260,21 @@ def _source_scene(
     anchor_path = str(out_dir / f"anchor_{scene_id:03d}.png")
     
     anchor = generate_anchor_image(prompt=prompt, output_path=anchor_path, niche=scene.get("niche", "default"))
+    path = None
     if anchor:
         path = generate_i2v_clip(prompt=prompt, anchor_image_path=anchor, output_path=clip_path, niche=scene.get("niche", "default"))
-    else:
+    
+    if not path:
+        # Evict I2V pipeline to free VRAM before loading CogVideoX
+        from tools.video_gen_tools import _PIPES, _video_device
+        import gc, torch
+        key = f"ltx_i2v_{_video_device(1).split(':')[-1]}"
+        if key in _PIPES:
+            del _PIPES[key]
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         path = generate_video_clip(prompt=prompt, output_path=clip_path, niche=scene.get("niche", "default"))
 
     # Fallback: FLUX+SVD professional pipeline (requires ESRGAN for best quality)

@@ -168,8 +168,8 @@ def create_thumbnail(
         log.info("thumbnail.falling_back_to_frame")
         bg_ready = extract_frame(video_path, tmp_bg)
 
-    if not bg_ready:
-        log.warning("thumbnail.no_background_available")
+    if not bg_ready or not Path(tmp_bg).exists() or Path(tmp_bg).stat().st_size < 1000:
+        log.warning("thumbnail.no_background_available_or_invalid")
         return None
 
     try:
