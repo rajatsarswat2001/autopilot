@@ -393,7 +393,21 @@ def normalise_audio(input_path: str, output_path: str, target_lufs: float = -16.
         lra   = stats.get("input_lra", "11.0")
         tp    = stats.get("input_tp",  "-1.5")
         off   = stats.get("input_thresh", "-26.0")
-        # Pass 2: apply
+        
+        # Guard: -inf measured loudness means silent/broken audio
+        # Fall through to single-pass rather than crashing ffmpeg
+        if il == "-inf" or float(il) < -70.0:
+            log.warning("normalise_audio.measured_inf_using_single_pass",
+                        measured_i=il)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", input_path,
+                 "-af", f"loudnorm=I={target_lufs}",
+                 output_path],
+                check=True, capture_output=True,
+            )
+            return output_path
+        
+        # Normal pass 2
         af = (
             f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11"
             f":measured_I={il}:measured_LRA={lra}"

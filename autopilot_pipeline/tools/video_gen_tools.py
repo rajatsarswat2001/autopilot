@@ -51,7 +51,7 @@ log = structlog.get_logger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _ENABLED   = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
-_STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "mirror").lower()  # mirror|hybrid|sequential
+_STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "sequential").lower()  # mirror|hybrid|sequential
 _HF_TOKEN  = os.getenv("HF_TOKEN", "")
 _STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))   # higher = sharper frames
 _STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "24"))
@@ -195,14 +195,15 @@ def _load_cogvideox(device: str = "cuda:1") -> object:
         pipe = CogVideoXPipeline.from_pretrained("THUDM/CogVideoX-2b", **load_kwargs)
 
         if hasattr(pipe, "vae"):
-            # ── CRITICAL T4 FIX: Force VAE into float32 BEFORE OFFLOAD ───────
-            # Root cause of black screens: CogVideoX VAE decoder uses float16
-            # during decode. On T4 GPUs, the large latent activations frequently
-            # overflow float16's max range (65504), producing NaN → pitch-black frames.
-            # Must happen before enable_model_cpu_offload so hooks capture the float32 cast!
             try:
+                # Keep VAE in float32 but patch the decode input to cast automatically
                 pipe.vae = pipe.vae.to(dtype=torch.float32)
-                log.info("cogvideox.vae_cast_float32")
+                # Patch forward to auto-cast input latents to float32
+                original_decode = pipe.vae.decode
+                def decode_fp32(z, *args, **kwargs):
+                    return original_decode(z.to(dtype=torch.float32), *args, **kwargs)
+                pipe.vae.decode = decode_fp32
+                log.info("cogvideox.vae_cast_float32_with_decode_patch")
             except Exception as vae_err:
                 log.warning("cogvideox.vae_cast_failed", error=str(vae_err)[:80])
 
