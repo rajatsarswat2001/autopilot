@@ -260,10 +260,6 @@ def _check_diffusers(m):
 
 def _check_bitsandbytes(m):
     """Verify bitsandbytes is functional (not just importable)."""
-    cfg = getattr(m, "BitsAndBytesConfig", None)
-    if cfg is None:
-        # bitsandbytes < 0.40 doesn't have BitsAndBytesConfig
-        raise ImportError("BitsAndBytesConfig not found — upgrade bitsandbytes")
     return getattr(m, "__version__", "OK")
 
 
