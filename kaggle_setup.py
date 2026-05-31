@@ -155,6 +155,8 @@ _run("diffusers deps", _pip(
     "sentencepiece>=0.2.0",
     "imageio>=2.34.0",
     "imageio-ffmpeg>=0.5.1",
+    "realesrgan",
+    "basicsr",
 ))
 
 # bitsandbytes: required for NF4 T5 quantization in CogVideoX loader.
