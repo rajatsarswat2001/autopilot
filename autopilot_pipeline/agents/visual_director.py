@@ -246,28 +246,26 @@ def _source_scene(
     """
     One AI video clip per scene via CogVideoX-2B.
 
-    CogVideoX is used as the primary pipeline (Issue 6 fix) because:
-      • Produces sharper, temporally coherent video vs SVD without ESRGAN installed
-      • Works natively with the dual-GPU mirror strategy for 2× speed
-      • No ESRGAN dependency required
-
-    Falls back to generate_professional_clip (FLUX+SVD) if CogVideoX unavailable,
-    or to a placeholder if everything fails.
+    CogVideoX is used as the primary pipeline (Issue 6 fix) since it produces
+    sharper, temporally coherent video and runs nicely on a single T4.
+    If it fails (e.g. OOM), it falls back to FLUX.1 + SVD.
     """
     scene_id = scene["scene_id"]
     mood     = scene.get("emotional_tone", "neutral")
-    niche    = os.environ.get("NICHE", "default")
     prompt   = scene.get("visual_prompt_A", scene.get("narration", ""))
-
-    clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}.mp4")
-
-    log.info("visual_director.scene", scene_id=scene_id, prompt=prompt[:60])
+    keyword  = scene.get("b_roll_keyword_A", "abstract")
 
     # Issue 6: Use CogVideoX as primary — sharper output, dual-GPU capable
+    clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_cogvideox.mp4")
+    
+    # Alternate GPUs: even scenes on cuda:0, odd scenes on cuda:1
+    target_device = f"cuda:{scene_index % 2}"
+
     path = generate_video_clip(
         prompt=prompt,
         output_path=clip_path,
-        niche=niche,
+        niche=scene.get("niche", "default"),
+        device=target_device,
     )
 
     # Fallback: FLUX+SVD professional pipeline (requires ESRGAN for best quality)
@@ -278,7 +276,7 @@ def _source_scene(
             path = generate_professional_clip(
                 prompt=prompt,
                 output_path=clip_path,
-                niche=niche,
+                niche=scene.get("niche", "default"),
                 scene_id=scene_id,
                 out_dir=out_dir,
             )
@@ -337,16 +335,17 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
     VISUAL_DIR.mkdir(parents=True, exist_ok=True)
     scenes    = manifest_dict.get("scenes", [])
 
-    # video_gen_tools manages intra-scene GPU parallelism (mirror/hybrid strategy)
-    # at the clip level. Scene-level must be sequential to avoid VRAM conflicts.
+    # video_gen_tools handles intra-scene GPU parallelism (mirror/hybrid strategy)
+    # at the clip level. Scene-level can run in parallel (up to 2 workers for 2 GPUs)
     video_gen_active = is_video_gen_available()
-    n_workers = 1 if video_gen_active else min(_MAX_WORKERS, max(len(scenes), 1))
+    # If video gen is active, we can use 2 workers (cuda:0 and cuda:1)
+    n_workers = min(2, len(scenes)) if video_gen_active else min(_MAX_WORKERS, max(len(scenes), 1))
 
     log.info(
         "visual_director.start",
         scenes=len(scenes),
         workers=n_workers,
-        mode="sequential (video_gen_tools handles intra-scene parallelism)" if video_gen_active else "parallel",
+        mode="parallel (dual GPU)" if video_gen_active else "parallel",
     )
 
     # ── Submit all scenes in parallel ─────────────────────────────────────────

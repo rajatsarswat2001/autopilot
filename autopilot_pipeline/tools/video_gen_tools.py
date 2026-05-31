@@ -614,6 +614,7 @@ def generate_video_clip(
     height: int = 480,
     num_inference_steps: int = 0,  # 0 = use env var default
     guidance_scale: float = 0.0,   # 0.0 = use model default
+    device: Optional[str] = None,  # override device selection
 ) -> Optional[str]:
     """
     Generate a single video clip. Primary: CogVideoX-2B. Fallback: LTX-Video.
@@ -623,7 +624,7 @@ def generate_video_clip(
         log.warning("video_gen.not_available")
         return None
 
-    dev = _video_device(1)
+    dev = device if device else _video_device(1)
 
     # Try CogVideoX first
     result = _run_cogvideox(prompt, output_path, device=dev, niche=niche)
