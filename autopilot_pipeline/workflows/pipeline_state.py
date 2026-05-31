@@ -74,6 +74,9 @@ class PipelineState(TypedDict, total=False):
     visual_scenes:   list[dict]  # per-scene visual info
     visual_manifest: Optional[dict]                        # VisualManifest.model_dump()
 
+    # ── Phase: Motion (New) ───────────────────────────────────────────────────
+    motion_scores: list[float]   # per-scene motion prompt quality scores
+
     # ── Phase: Title A/B ─────────────────────────────────────────────────────
     title_variants: list[dict]   # all scored title variants
 

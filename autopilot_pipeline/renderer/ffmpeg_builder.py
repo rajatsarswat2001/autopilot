@@ -48,7 +48,7 @@ def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: f
     another FFmpeg encode step (concat + fade). Lossless here prevents stacked
     quality loss from multiple lossy re-encodes in the pipeline.
     """
-    vf_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+    vf_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1"
     subprocess.run(
         [
             "ffmpeg", "-y",

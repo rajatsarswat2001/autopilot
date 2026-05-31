@@ -92,7 +92,11 @@ _LOCKS: dict[str, threading.Lock] = {
 
 # ── Style tokens ───────────────────────────────────────────────────────────────
 _STYLE = "cinematic, anamorphic, 8K, photorealistic, masterful composition, no text"
-_MOTION = "dynamic motion, active movement, cinematic camera pan, temporal variation, fluid animation"
+_MOTION = (
+    "continuous camera movement, smooth dolly push forward, "
+    "natural subject motion throughout entire clip, "
+    "no static frames, temporal coherence, 24fps cinematic motion"
+)
 _NICHE_TOKENS: dict[str, str] = {
     "personal_finance": "professional finance office, corporate aesthetic",
     "saas_tools":       "sleek tech workspace, dark UI glow",
@@ -427,7 +431,7 @@ def _run_cogvideox(
                 prompt=enriched,
                 negative_prompt=_NEGATIVE,
                 height=480,
-                width=720,
+                width=848,
                 num_frames=25,        # 25 frames @ 8fps ≈ 3.1s; fits 15.6 GB T4 in FP16
                 num_inference_steps=_STEPS_COG,
                 guidance_scale=6.0,

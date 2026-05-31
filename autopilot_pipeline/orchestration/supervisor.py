@@ -35,6 +35,7 @@ from agents.script_agent import script_writer_node
 from agents.entropy_agent import entropy_node
 from agents.compliance_agent import compliance_node
 from agents.title_ab_agent import title_ab_node
+from agents.motion_agent import motion_node
 from agents.audio_agent import audio_node
 from agents.visual_director import visual_node
 from agents.assembly_agent import assembly_node
@@ -225,6 +226,7 @@ def build_pipeline(checkpointer=None):
     g.add_node("entropy",       entropy_node)
     g.add_node("compliance",    compliance_node)
     g.add_node("title_ab",      title_ab_node)
+    g.add_node("motion",        motion_node)
     g.add_node("human_review",  human_review_node)
     g.add_node("audio",         audio_node)
     g.add_node("visual",        visual_node)
@@ -247,7 +249,8 @@ def build_pipeline(checkpointer=None):
                             {"compliance": "compliance", "failed": "failed"})
     g.add_conditional_edges("compliance",   route_after_compliance,
                             {"title_ab": "title_ab", "script": "script", "failed": "failed"})
-    g.add_edge("title_ab", "human_review")
+    g.add_edge("title_ab", "motion")
+    g.add_edge("motion", "human_review")
     g.add_conditional_edges("human_review", route_after_human,
                             {"audio": "audio", "script": "script", "failed": "failed"})
     g.add_conditional_edges("audio",        route_after_audio,
@@ -318,6 +321,7 @@ def make_initial_state(
         human_notes=None,
         messages=[],
         title_variants=[],
+        motion_scores=[],
         created_at=now,
         updated_at=now,
     )
