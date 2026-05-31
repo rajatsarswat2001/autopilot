@@ -163,6 +163,30 @@ def _compile_clip(clip: TimelineClip, fps: int, cache: ClipCache) -> CompiledCli
             status="cached",
         )
 
+    # ── Issue 5 fix: short-circuit when A and B are identical ─────────────────────
+    if clip.visual_path_A == clip.visual_path_B:
+        direct_out = str(SCRATCH_DIR / f"clip_{scene_id:03d}_direct.mp4")
+        try:
+            loop_video_to_duration(clip.visual_path_A, direct_out, duration)
+            visual_path = direct_out
+            log.info("compiler.same_path_shortcircuit", scene_id=scene_id)
+        except Exception as e:
+            log.warning("compiler.loop_failed_using_source", scene_id=scene_id, error=str(e))
+            visual_path = clip.visual_path_A
+        cache.put(cache_key, visual_path)
+        return CompiledClip(
+            scene_id=scene_id,
+            visual_path=visual_path,
+            audio_path=clip.audio_path,
+            duration_s=duration,
+            start_s=clip.start_s,
+            end_s=clip.end_s,
+            transition_in=clip.transition_in,
+            transition_out=clip.transition_out,
+            transition_duration_s=clip.transition_duration_s,
+            status="needs_render",
+        )
+
     path_a = _compile_visual(clip.visual_path_A, clip.visual_type_A, clip.ken_burns_A, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "A", clip.motion_direction_A)
     path_b = _compile_visual(clip.visual_path_B, clip.visual_type_B, clip.ken_burns_B, clip.visual_width, clip.visual_height, half_dur, fps, scene_id, "B", clip.motion_direction_B)
 
@@ -181,8 +205,8 @@ def _compile_clip(clip: TimelineClip, fps: int, cache: ClipCache) -> CompiledCli
                 "-map", "[v]",
                 "-t", str(duration),
                 "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "20",
+                "-preset", "ultrafast",
+                "-crf", "0",
                 visual_path,
             ],
             check=True, capture_output=True, timeout=120

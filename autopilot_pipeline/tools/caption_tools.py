@@ -103,7 +103,9 @@ _BASE_STYLES: dict[str, dict] = {
 }
 
 # Speaking rate / timing constants
-_DEFAULT_WPS    = 2.8   # words per second (realistic Chatterbox rate; Edge=3.0)
+# 2.8 WPS × 0.92 atempo = 2.576 \u2248 2.6 — matches realistic slowed Chatterbox rate.
+# Without this, captions appear ~17% too early when atempo < 1.0.
+_DEFAULT_WPS    = 2.6   # words per second at atempo=0.92
 _MIN_WORD_S     = 0.18
 _MAX_WORD_S     = 0.80
 _WORDS_PER_LINE = 4     # words per caption chunk

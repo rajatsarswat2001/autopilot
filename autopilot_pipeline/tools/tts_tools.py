@@ -137,9 +137,9 @@ def _tts_chatterbox(text: str, output_path: str, emotion_exaggeration: float = 0
         tmp_path = tmp.name
     torchaudio.save(tmp_path, wav, model.sr)
 
-    # Slow down voice slightly
+    # Slow down voice slightly — 0.92 keeps natural prosody without adding excess length
     subprocess.run([
-        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.85", output_path
+        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.92", output_path
     ], check=True, capture_output=True)
     Path(tmp_path).unlink(missing_ok=True)
 
@@ -191,9 +191,9 @@ def _tts_kokoro(text: str, output_path: str) -> None:
         tmp_path = tmp.name
     sf.write(tmp_path, combined, 24000)
     
-    # Apply pace normalization for Kokoro
+    # Apply pace normalization for Kokoro — 0.92 matches Chatterbox setting
     subprocess.run([
-        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.87", output_path
+        "ffmpeg", "-y", "-i", tmp_path, "-filter:a", "atempo=0.92", output_path
     ], check=True, capture_output=True)
     Path(tmp_path).unlink(missing_ok=True)
     
@@ -250,7 +250,7 @@ def _tts_edge(text: str, output_path: str) -> None:
         # Convert MP3 → WAV via ffmpeg and apply pace normalization
         import subprocess
         subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "24000", "-ac", "1", "-filter:a", "atempo=0.88", output_path],
+            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "24000", "-ac", "1", "-filter:a", "atempo=0.92", output_path],
             check=True, capture_output=True,
         )
         Path(tmp_path).unlink(missing_ok=True)

@@ -42,7 +42,12 @@ SCRATCH_DIR     = Path(os.getenv("SCRATCH_DIR",  "outputs/video/scratch")).resol
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: float, width: int = 1920, height: int = 1080) -> str:
-    """Combine one video clip with its voiceover WAV, scaling and padding to target resolution."""
+    """Combine one video clip with its voiceover WAV, scaling and padding to target resolution.
+    
+    Uses lossless intermediate encoding (CRF 0) because this output is fed into
+    another FFmpeg encode step (concat + fade). Lossless here prevents stacked
+    quality loss from multiple lossy re-encodes in the pipeline.
+    """
     vf_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
     subprocess.run(
         [
@@ -54,8 +59,8 @@ def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: f
             "-vf",  vf_filter,
             "-t",   str(duration_s),
             "-c:v", "libx264",
-            "-preset", FFMPEG_PRESET,
-            "-crf",    str(FFMPEG_CRF),
+            "-preset", "ultrafast",   # Issue 10: lossless intermediate — fast + no quality loss
+            "-crf",    "0",           # lossless; final output applies normal CRF via loudnorm step
             "-c:a",    "aac",
             "-b:a",    FFMPEG_AUDIO_BR,
             "-shortest",
@@ -73,24 +78,30 @@ def _mux_clip(visual_path: str, audio_path: str, output_path: str, duration_s: f
 def _build_fade_filter(clip_paths: list[str], durations: list[float], fade_s: float = 0.25) -> str:
     """
     Build an FFmpeg filter_complex string that:
-      - Applies fade-out to end of each clip
-      - Applies fade-in to start of each clip
+      - Applies VIDEO fade-in/fade-out at each clip boundary (smooth visual transition)
+      - Passes AUDIO through UNMODIFIED (no afade on narration)
       - Concatenates all clips
+
+    WHY no afade on audio:
+      afade creates 0.25 s of silence at the start of every clip. The ASS caption
+      file is timed from the raw scene durations (no gaps), so adding audio fades
+      makes the narration start 0.25 s later than the caption expects at every
+      scene boundary — a cumulative drift of N×0.25 s by scene N.
+      Video fades are purely cosmetic and don't affect audio/caption timing.
     """
     n = len(clip_paths)
     parts = []
 
     for i in range(n):
-        dur   = durations[i]
+        dur        = durations[i]
         fade_out_t = max(0, dur - fade_s)
+        # VIDEO: smooth fade-in at start, fade-out at end
         parts.append(
             f"[{i}:v]fade=t=in:st=0:d={fade_s},"
             f"fade=t=out:st={fade_out_t:.3f}:d={fade_s}[v{i}];"
         )
-        parts.append(
-            f"[{i}:a]afade=t=in:st=0:d={fade_s},"
-            f"afade=t=out:st={fade_out_t:.3f}:d={fade_s}[a{i}];"
-        )
+        # AUDIO: pass through with anull (no timing change, no silence)
+        parts.append(f"[{i}:a]anull[a{i}];")
 
     vstreams = "".join(f"[v{i}]" for i in range(n))
     astreams = "".join(f"[a{i}]" for i in range(n))
@@ -165,6 +176,15 @@ def render_timeline(plan: RenderPlan, output_path: str | None = None,
         fade_out    = plan.music_fade_out
         fade_out_st = max(0, total_dur - fade_out)
 
+        # WHY no sidechaincompress:
+        #   sidechaincompress introduces filter latency (attack + lookahead) to
+        #   the audio stream while video is copied (-c:v copy) with zero delay.
+        #   Over a 2-minute video this can push audio 100-200 ms ahead of the
+        #   video track, causing captions to appear after the words are spoken.
+        #
+        #   The music is already at a low volume (default vol=0.10 = 10%), so
+        #   it doesn't overpower narration without dynamic ducking. Simple amix
+        #   gives zero-latency mixing and perfect A/V sync.
         subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -174,8 +194,7 @@ def render_timeline(plan: RenderPlan, output_path: str | None = None,
                 f"[1:a]volume={vol},"
                 f"afade=t=in:st=0:d={fade_in},"
                 f"afade=t=out:st={fade_out_st:.1f}:d={fade_out}[music];"
-                f"[music][0:a]sidechaincompress=threshold=0.03:ratio=4:attack=5:release=50[ducked_music];"
-                f"[0:a][ducked_music]amix=inputs=2:duration=first[aout]",
+                f"[0:a][music]amix=inputs=2:duration=first:normalize=0[aout]",
                 "-map", "0:v",
                 "-map", "[aout]",
                 "-t", str(total_dur),
@@ -225,4 +244,15 @@ def render_timeline(plan: RenderPlan, output_path: str | None = None,
         normalise_audio(concat_out, final_path, target_lufs=TARGET_LUFS)
 
     log.info("render.done", output=final_path)
+
+    # Speed fix 4: Clean up scratch dir after each run so stale intermediates
+    # don't accumulate and waste disk space across runs.
+    try:
+        import shutil
+        shutil.rmtree(SCRATCH_DIR, ignore_errors=True)
+        SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+        log.info("render.scratch_cleaned")
+    except Exception as e:
+        log.warning("render.scratch_cleanup_failed", error=str(e))
+
     return final_path

@@ -244,11 +244,16 @@ def _source_scene(
     out_dir: Path,
 ) -> VisualScene:
     """
-    One professional clip per scene. No A/B split.
-    Uses FLUX + SVD + ESRGAN pipeline.
+    One AI video clip per scene via CogVideoX-2B.
+
+    CogVideoX is used as the primary pipeline (Issue 6 fix) because:
+      • Produces sharper, temporally coherent video vs SVD without ESRGAN installed
+      • Works natively with the dual-GPU mirror strategy for 2× speed
+      • No ESRGAN dependency required
+
+    Falls back to generate_professional_clip (FLUX+SVD) if CogVideoX unavailable,
+    or to a placeholder if everything fails.
     """
-    from tools.video_gen_tools import generate_professional_clip
-    
     scene_id = scene["scene_id"]
     mood     = scene.get("emotional_tone", "neutral")
     niche    = os.environ.get("NICHE", "default")
@@ -258,20 +263,35 @@ def _source_scene(
 
     log.info("visual_director.scene", scene_id=scene_id, prompt=prompt[:60])
 
-    path = generate_professional_clip(
+    # Issue 6: Use CogVideoX as primary — sharper output, dual-GPU capable
+    path = generate_video_clip(
         prompt=prompt,
         output_path=clip_path,
         niche=niche,
-        scene_id=scene_id,
-        out_dir=out_dir,
     )
+
+    # Fallback: FLUX+SVD professional pipeline (requires ESRGAN for best quality)
+    if not path:
+        log.warning("visual_director.cogvideox_failed_trying_professional", scene_id=scene_id)
+        try:
+            from tools.video_gen_tools import generate_professional_clip
+            path = generate_professional_clip(
+                prompt=prompt,
+                output_path=clip_path,
+                niche=niche,
+                scene_id=scene_id,
+                out_dir=out_dir,
+            )
+        except Exception as e:
+            log.warning("visual_director.professional_clip_failed", scene_id=scene_id, error=str(e)[:120])
 
     if not path:
         # Absolute last resort — placeholder
         path = _make_placeholder(scene_id, mood, out_dir, "A")
         asset_type, source = "placeholder", "placeholder"
     else:
-        asset_type, source = "video_clip", "svd_flux"
+        asset_type = "video_clip"
+        source     = "cogvideox"
 
     orientation = os.environ.get("FORMAT", "youtube").lower()
     width, height = (1080, 1920) if orientation in ("reel", "short") else (1920, 1080)

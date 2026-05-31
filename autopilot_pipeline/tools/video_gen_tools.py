@@ -33,7 +33,10 @@ Environment variables:
 """
 from __future__ import annotations
 
+import gc
+import hashlib
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -52,6 +55,17 @@ _STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "mirror").lower()  # mirror|hybrid|
 _HF_TOKEN  = os.getenv("HF_TOKEN", "")
 _STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))   # higher = sharper frames
 _STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "24"))
+
+# ── Kaggle detection ──────────────────────────────────────────────────────────
+# api-inference.huggingface.co is often blocked on Kaggle even when internet is
+# "enabled" in settings — the subdomain is behind Kaggle's egress proxy filter.
+# Detect Kaggle and skip HF entirely to avoid wasting ~72 s on failed retries.
+_IS_KAGGLE = os.path.exists("/kaggle/working")
+
+# ── Anchor image disk cache ───────────────────────────────────────────────────
+# Avoids re-generating identical Pollinations images across runs/retries.
+_ANCHOR_CACHE = Path("data/anchor_cache")
+_ANCHOR_CACHE.mkdir(parents=True, exist_ok=True)
 
 # ── GPU assignment ─────────────────────────────────────────────────────────────
 def _num_gpus() -> int:
@@ -387,7 +401,6 @@ def _run_cogvideox(
 ) -> Optional[str]:
     try:
         import torch
-        import gc
         pipe     = _load_cogvideox(device)
         enriched = _enrich(prompt, niche)
 
@@ -416,14 +429,23 @@ def _run_cogvideox(
                 generator=generator,
             )
 
-        return _frames_to_mp4(result.frames[0], output_path, fps=8)
+        path = _frames_to_mp4(result.frames[0], output_path, fps=8)
+
+        # Fix 9: Run full GC after successful inference so Python's reference
+        # cycle collector releases fragmented tensors before the next scene.
+        # torch.cuda.empty_cache() alone doesn't trigger cycle collection.
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()  # prevents false OOM from stale stats
+
+        return path
 
     except Exception as e:
         log.error("cogvideox.failed", device=device, error=str(e)[:300])
         # Clean up dirty VRAM before LTX fallback can attempt to load.
         # Without this, fragmented post-OOM blocks cause LTX to also fail.
         try:
-            import torch, gc
+            import torch
             if key := f"cog_{device.split(':')[-1]}":
                 _PIPES.pop(key, None)
             gc.collect()
@@ -800,7 +822,10 @@ def _generate_flux_anchor(
         "low quality, blurry, overexposed, flat lighting, stock photo look"
     )
 
-    if hf_token:
+    # Speed fix 1: Skip HF entirely on Kaggle — api-inference.huggingface.co
+    # is blocked by Kaggle's egress proxy even when internet is "enabled".
+    # This saves ~72 s of failed retries per scene.
+    if hf_token and not _IS_KAGGLE:
         for attempt in range(3):
             try:
                 if attempt > 0:
@@ -830,8 +855,17 @@ def _generate_flux_anchor(
             except Exception as e:
                 log.warning("flux_anchor.hf_error", attempt=attempt, error=str(e)[:100])
 
-    # Fallback: Pollinations FLUX (no token needed)
+    # Speed fix 3: Pollinations anchor disk cache — avoids re-fetching identical
+    # images on retries or across runs. Keyed on prompt + dimensions.
     from urllib.parse import quote as url_encode
+    cache_key  = hashlib.md5(f"{enriched}{width}{height}".encode()).hexdigest()[:16]
+    cached_img = _ANCHOR_CACHE / f"{cache_key}.png"
+    if cached_img.exists() and cached_img.stat().st_size > 10_000:
+        shutil.copy2(cached_img, output_path)
+        log.info("flux_anchor.cache_hit", key=cache_key, path=output_path)
+        return output_path
+
+    # Fallback: Pollinations FLUX (no token needed)
     for attempt in range(3):
         try:
             if attempt > 0:
@@ -847,6 +881,8 @@ def _generate_flux_anchor(
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
             if Path(output_path).stat().st_size > 10_000:
+                # Persist to cache for future runs
+                shutil.copy2(output_path, cached_img)
                 log.info("flux_anchor.pollinations_ok", path=output_path, attempt=attempt)
                 return output_path
         except Exception as e:
@@ -952,9 +988,10 @@ def _upscale_video_realesrgan(
                 cv2.imwrite(str(up_dir / frame_path.name), upscaled)
 
             # Re-encode: scale/crop to exact 1920x1080
+            # NOTE: framerate must match SVD output fps (8), not old hardcoded 6
             subprocess.run([
                 "ffmpeg", "-y",
-                "-framerate", "6",
+                "-framerate", "8",
                 "-i", str(up_dir / "frame_%05d.png"),
                 "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
                 "-c:v", "libx264",
