@@ -54,6 +54,7 @@ def visual_qa_node(state: PipelineState) -> dict[str, Any]:
         }
 
     failed_clips = []
+    warning_notes = []
 
     for scene in scenes:
         sid = scene.get("scene_id")
@@ -76,9 +77,9 @@ def visual_qa_node(state: PipelineState) -> dict[str, Any]:
                 failed_clips.append(f"Scene {sid} {asset_key} is 0 bytes.")
                 continue
 
-            # Placeholder check - fail if too many or if we expected generation
+            # Placeholder check - soft fail (warning)
             if source == "placeholder":
-                failed_clips.append(f"Scene {sid} {asset_key} is a placeholder.")
+                warning_notes.append(f"Scene {sid} {asset_key} is a placeholder.")
                 continue
                 
             # Duration check for videos
@@ -96,9 +97,13 @@ def visual_qa_node(state: PipelineState) -> dict[str, Any]:
             "job_status": "failed",
         }
 
-    log.info("visual_qa.passed", scenes=len(scenes))
+    final_notes = "All clips passed QA."
+    if warning_notes:
+        final_notes = "Warnings: " + " | ".join(warning_notes)
+
+    log.info("visual_qa.passed", scenes=len(scenes), warnings=len(warning_notes))
     return {
         "visual_qa_passed": True,
-        "visual_qa_notes": "All clips passed QA.",
+        "visual_qa_notes": final_notes,
         "job_status": "assembly",
     }

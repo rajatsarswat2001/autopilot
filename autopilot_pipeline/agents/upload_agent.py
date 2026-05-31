@@ -192,8 +192,17 @@ def upload_node(state: PipelineState) -> dict[str, Any]:
         return {"errors": [err]}
 
     title       = manifest_dict.get("title", "AutoPilot Video")
-    tags        = manifest_dict.get("tags", [])
-    description = _build_description(manifest_dict, source_urls)
+    
+    seo_metadata = state.get("seo_metadata")
+    if seo_metadata:
+        description = seo_metadata.get("description", "")
+        # YouTube tags are usually comma separated without the # symbol
+        tags = [tag.strip("#") for tag in seo_metadata.get("hashtags", [])]
+        log.info("upload_agent.using_seo_metadata")
+    else:
+        tags        = manifest_dict.get("tags", [])
+        description = _build_description(manifest_dict, source_urls)
+        log.info("upload_agent.using_fallback_metadata")
 
     youtube = _get_youtube_service()
 

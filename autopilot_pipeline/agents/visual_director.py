@@ -258,14 +258,10 @@ def _source_scene(
     # Issue 6: Use CogVideoX as primary — sharper output, dual-GPU capable
     clip_path = str(out_dir / f"{video_id}_scene_{scene_id:03d}_cogvideox.mp4")
     
-    # Alternate GPUs: even scenes on cuda:0, odd scenes on cuda:1
-    target_device = f"cuda:{scene_index % 2}"
-
     path = generate_video_clip(
         prompt=prompt,
         output_path=clip_path,
         niche=scene.get("niche", "default"),
-        device=target_device,
     )
 
     # Fallback: FLUX+SVD professional pipeline (requires ESRGAN for best quality)
