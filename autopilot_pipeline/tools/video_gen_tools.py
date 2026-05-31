@@ -806,8 +806,11 @@ def _generate_flux_anchor(
                 if attempt > 0:
                     time.sleep(3 * attempt)
                 resp = requests.post(
-                    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
-                    headers={"Authorization": f"Bearer {hf_token}"},
+                    "https://api-inference.huggingface.co/v1/models/black-forest-labs/FLUX.1-schnell",
+                    headers={
+                        "Authorization": f"Bearer {hf_token}",
+                        "x-wait-for-model": "true",
+                    },
                     json={
                         "inputs": enriched,
                         "parameters": {
@@ -817,7 +820,7 @@ def _generate_flux_anchor(
                             "guidance_scale": 0.0,
                         },
                     },
-                    timeout=90,
+                    timeout=120,
                 )
                 if resp.status_code == 200 and len(resp.content) > 10_000:
                     Path(output_path).write_bytes(resp.content)
@@ -856,10 +859,10 @@ def _generate_flux_anchor(
 def _animate_with_svd(
     anchor_path: str,
     output_path: str,
-    num_frames: int = 25,
-    fps: int = 6,
-    motion_bucket_id: int = 100,   # 0-255: lower = less motion, 127 = default
-    noise_aug_strength: float = 0.02,
+    num_frames: int = 49,
+    fps: int = 8,
+    motion_bucket_id: int = 65,
+    noise_aug_strength: float = 0.01,
     device: str = "cuda:0",
 ) -> Optional[str]:
     """
@@ -884,7 +887,7 @@ def _animate_with_svd(
                 fps=fps,
                 motion_bucket_id=motion_bucket_id,
                 noise_aug_strength=noise_aug_strength,
-                decode_chunk_size=8,        # decode 8 frames at a time (VRAM safe)
+                decode_chunk_size=4,        # decode 4 frames at a time (VRAM safe)
             )
 
         frames = result.frames[0]
