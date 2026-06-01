@@ -120,6 +120,12 @@ def _evict_pipeline(key: str):
         import torch
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+        
+        # Log memory_reserved to verify eviction actually dropped the blocks
+        device_idx = key.split('_')[-1]
+        device = f"cuda:{device_idx}" if device_idx.isdigit() else "cuda:0"
+        reserved_gb = torch.cuda.memory_reserved(device) / 1e9
+        log.info("evict.complete", key=key, device=device, reserved_gb=round(reserved_gb, 2))
     except Exception:
         pass
 
