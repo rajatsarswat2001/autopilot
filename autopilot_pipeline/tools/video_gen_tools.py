@@ -38,6 +38,7 @@ log = structlog.get_logger(__name__)
 _ENABLED      = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
 _HF_TOKEN     = os.getenv("HF_TOKEN", "")
 _IS_KAGGLE    = os.path.exists("/kaggle/working")
+_FORCED_MODEL = os.getenv("VIDEO_GEN_MODEL", "").strip().lower()
 
 # Wan2.1 params — primary model
 _WAN_MODEL    = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
@@ -325,8 +326,9 @@ def _load_ltx_i2v(device: str = "cuda:0") -> Optional[object]:
                 torch_dtype=torch.float16,
             )
 
-            # T4 float16 VAE patch — prevents NaN black frames
+            # Force VAE to float32 to prevent NaN black frames, and patch decoder
             if hasattr(pipe, "vae"):
+                pipe.vae.to(torch.float32)
                 original_decode = pipe.vae.decode
                 def patched_decode(z, *args, **kwargs):
                     return original_decode(z.to(torch.float32), *args, **kwargs)
@@ -587,6 +589,13 @@ def generate_video_clip(
 
     dev = device or _video_device(1)
 
+    if _FORCED_MODEL == "cogvideox":
+        return _run_cogvideox(prompt, output_path, dev, niche)
+    elif _FORCED_MODEL == "wan21":
+        return _run_wan(prompt, output_path, dev, niche)
+    elif _FORCED_MODEL == "ltx":
+        return _run_ltx_i2v(prompt, anchor_path="", output_path=output_path, device=dev, niche=niche)
+
     # Tier 1: Wan2.1
     result = _run_wan(prompt, output_path, dev, niche)
     if result:
@@ -625,9 +634,13 @@ def generate_i2v_clip(
 
     dev = _video_device(1)
 
+    if _FORCED_MODEL in ["cogvideox", "wan21"]:
+        # I2V not supported by these, fallback to T2V
+        return generate_video_clip(prompt, output_path, duration_s, niche)
+
     if anchor_image_path and Path(anchor_image_path).exists():
         result = _run_ltx_i2v(prompt, anchor_image_path, output_path, dev, niche)
-        if result:
+        if result or _FORCED_MODEL == "ltx":
             return result
         _evict_pipeline(f"ltx_i2v_{dev.split(':')[-1]}")
 
