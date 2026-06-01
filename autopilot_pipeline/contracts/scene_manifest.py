@@ -112,7 +112,7 @@ class SceneManifest(BaseModel):
     niche: str
     target_cpm_tier: int = Field(..., ge=1, le=3)
     hook: str = Field(..., min_length=20, description="Opening hook — triggers loss aversion or curiosity")
-    scenes: list[Scene] = Field(..., min_length=4, max_length=25)
+    scenes: list[Scene] = Field(..., min_length=3, max_length=25)
     call_to_action: str = Field(
         default="What money mistake have YOU made? Drop it in the comments below.",
         min_length=10,

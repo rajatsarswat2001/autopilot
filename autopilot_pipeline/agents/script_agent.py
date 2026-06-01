@@ -189,7 +189,7 @@ def script_writer_node(state: PipelineState) -> dict[str, Any]:
             f"Topic: {topic}\nNiche: {niche}\n"
             f"Research:\n{research or 'Use general knowledge.'}\n\n"
             f"Schema:\n{_SCHEMA}\n\n"
-            "Generate exactly a 4 scene script. Make the hook arresting and specific. "
+            "Generate exactly a 3 scene script. Make the hook arresting and specific. "
             "Ensure 'title' is present as a top-level JSON field and is under 70 characters."
         )
         messages = [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user_msg}]

@@ -105,28 +105,33 @@ def _free_vram_gb(device: str) -> float:
 
 
 def _evict_pipeline(key: str):
-    """Move pipeline components to CPU and release VRAM."""
     pipe = _PIPES.pop(key, None)
-    if pipe is not None:
-        for attr in ("transformer", "text_encoder", "text_encoder_2", "vae", "image_encoder"):
-            component = getattr(pipe, attr, None)
-            if component is not None and hasattr(component, "to"):
-                try:
-                    component.to("cpu")
-                except Exception:
-                    pass
-        del pipe
+    if pipe is None:
+        return
+    
+    for attr in ("transformer", "text_encoder", "text_encoder_2", 
+                 "vae", "image_encoder", "scheduler"):
+        component = getattr(pipe, attr, None)
+        if component is not None and hasattr(component, "to"):
+            try:
+                component.to("cpu")
+            except Exception:
+                pass
+    
+    # Remove CPU offload hooks — this is what releases the pinned memory
+    if hasattr(pipe, "_all_hooks"):
+        for hook in pipe._all_hooks:
+            hook.remove()
+        pipe._all_hooks = []
+    
+    del pipe
     gc.collect()
+    
     try:
         import torch
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        
-        # Log memory_reserved to verify eviction actually dropped the blocks
-        device_idx = key.split('_')[-1]
-        device = f"cuda:{device_idx}" if device_idx.isdigit() else "cuda:0"
-        reserved_gb = torch.cuda.memory_reserved(device) / 1e9
-        log.info("evict.complete", key=key, device=device, reserved_gb=round(reserved_gb, 2))
     except Exception:
         pass
 
@@ -326,14 +331,21 @@ def _load_ltx_i2v(device: str = "cuda:0") -> Optional[object]:
                 torch_dtype=torch.float16,
             )
 
-            # Force VAE to float32 to prevent NaN black frames, and patch decoder
-            if hasattr(pipe, "vae"):
-                pipe.vae.to(torch.float32)
-                original_decode = pipe.vae.decode
-                def patched_decode(z, *args, **kwargs):
-                    return original_decode(z.to(torch.float32), *args, **kwargs)
-                pipe.vae.decode = patched_decode
-                log.info("ltx_i2v.vae_fp32_patch_applied")
+            # Force entire pipeline to float16, then patch VAE to float32
+            pipe = pipe.to(torch.float16)
+            
+            # Now patch VAE to float32 for stable decode
+            pipe.vae = pipe.vae.to(torch.float32)
+            original_decode = pipe.vae.decode
+            
+            def patched_decode(z, *args, **kwargs):
+                return original_decode(z.to(torch.float32), *args, **kwargs)
+            
+            pipe.vae.decode = patched_decode
+            
+            # Also cast text encoder biases to float16 explicitly
+            if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+                pipe.text_encoder = pipe.text_encoder.to(torch.float16)
 
             gpu_id = int(device.split(':')[-1]) if ':' in device else 0
             pipe.enable_model_cpu_offload(gpu_id=gpu_id)
