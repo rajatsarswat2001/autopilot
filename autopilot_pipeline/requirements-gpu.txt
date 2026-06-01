@@ -30,7 +30,7 @@
 #   Wan2.1 VAE is stable in float16 natively — no patch needed.
 #
 # REMOVED vs v1:
-bitsandbytes>=0.43.0
+#   bitsandbytes    — no longer needed (Wan2.1 fits T4 without NF4 quantization)
 #   torchao         — removed (caused crashes, never needed for Wan2.1)
 #   mirror strategy — removed (Wan2.1 is single-model; parallel pair gen
 #                     gives no benefit vs sequential on one T4)

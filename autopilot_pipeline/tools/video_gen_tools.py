@@ -207,29 +207,12 @@ def _load_wan(device: str = "cuda:0") -> Optional[object]:
         try:
             import torch
             from diffusers import WanPipeline
-            from transformers import UMT5EncoderModel, BitsAndBytesConfig
 
             free = _free_vram_gb(device)
             log.info("wan.loading", device=device, free_vram_gb=round(free, 1))
 
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_quant_type="nf4",
-            )
-            
-            log.info("wan.loading_text_encoder", device=device)
-            text_encoder = UMT5EncoderModel.from_pretrained(
-                _WAN_MODEL,
-                subfolder="text_encoder",
-                quantization_config=quantization_config,
-                device_map={"": device},
-                torch_dtype=torch.float16,
-            )
-
             pipe = WanPipeline.from_pretrained(
                 _WAN_MODEL,
-                text_encoder=text_encoder,
                 torch_dtype=torch.float16,
             )
             pipe.to(device)
