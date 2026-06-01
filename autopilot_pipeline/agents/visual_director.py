@@ -4,17 +4,14 @@ agents/visual_director.py
 Visual Director Agent — sources AI-generated visuals for every scene.
 
 Asset sourcing priority (per clip, Tier 1 through Tier 4):
-  Tier 1: CogVideoX-2B — primary AI video
-           NF4 T5 (2.1 GB) + fp16 Transformer (4 GB), ~9 GB VRAM peak, 25 frames @ 8fps
+  Tier 1: Wan2.1 T2V-1.3B — primary AI video
+           ~8.2 GB VRAM peak, 81 frames @ 24fps
            Internally managed by tools/video_gen_tools.py.
-           Strategy controlled via VIDEO_GEN_STRATEGY env var:
-             mirror     (default) — CogVideoX on both GPUs, A+B in parallel (2x speed)
-             hybrid              — LTX-Video(cuda:0) + CogVideoX(cuda:1) simultaneously
-             sequential          — single GPU, safe on low-VRAM setups
-  Tier 2: LTX-Video 0.9 distilled — fast fallback inside video_gen_tools
-           (auto-selected if CogVideoX fails; capped at 49 frames in degraded state)
-  Tier 3: Pexels stock footage   — keyword-matched (DISABLE_STOCK != 1)
-  Tier 4: Pollinations FLUX      — free AI still image with Ken Burns animation
+  Tier 2: LTX-Video I2V — fallback if anchor provided
+           (auto-selected if Wan2.1 fails or as primary I2V)
+  Tier 3: CogVideoX-2B — last resort fallback
+  Tier 4: Pexels stock footage — keyword-matched (DISABLE_STOCK != 1)
+  Tier 5: Pollinations FLUX — free AI still image with Ken Burns animation
   Tier 5: Placeholder            — mood-coloured gradient PNG (absolute last resort)
 
 CRITICAL (T4 GPU):
@@ -140,7 +137,7 @@ def _source_asset(
         try:
             result = None
             src = "cogvideox"
-            if anchor_image_path:
+            if anchor_image_path and _I2V_ENABLED:
                 result = generate_i2v_clip(
                     prompt=prompt,
                     anchor_image_path=anchor_image_path,
@@ -152,11 +149,9 @@ def _source_asset(
             
             if not result:
                 # Evict I2V pipeline to free VRAM before loading CogVideoX
-                from tools.video_gen_tools import _PIPES, _video_device
+                from tools.video_gen_tools import _evict_pipeline, _video_device
                 import gc, torch
-                key = f"ltx_i2v_{_video_device(1).split(':')[-1]}"
-                if key in _PIPES:
-                    del _PIPES[key]
+                _evict_pipeline(f"ltx_i2v_{_video_device(1).split(':')[-1]}")
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -167,7 +162,7 @@ def _source_asset(
                     duration_s=duration_s,
                     niche=niche,
                 )
-                src = "cogvideox"
+                src = "wan21" if result else "cogvideox"
 
             if result:
                 log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label, mode=src)

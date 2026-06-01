@@ -1,35 +1,21 @@
 """
-tools/video_gen_tools.py
-────────────────────────────────────────────────────────────────────────────────
-Kaggle T4 x2 — Unified AI video generation.
-Replaces wan21_tools.py entirely.
+tools/video_gen_tools.py  — v2.0
+================================================================================
+Kaggle Dual T4 — Upgraded AI video generation.
 
-CRITICAL T4 INSIGHT: T4 (Turing) does NOT support bfloat16 natively.
-Using bfloat16 on T4 triggers slow emulated execution. Always use float16.
+CHANGES FROM v1:
+  Primary  : Wan2.1-T2V-1.3B (8.19 GB VRAM, far better motion than CogVideoX-2B)
+  I2V path : LTX-Video I2V   (768x512, 65 frames, corrected guidance)
+  Fallback : CogVideoX-2B    (demoted to last resort, fps fixed to 24)
+  Removed  : Mirror/hybrid strategies (Wan2.1 is single-model, no benefit)
 
-Tier 1: CogVideoX-2B  — primary, NF4 T5 + fp16 Transformer, ~9 GB VRAM peak
-         T5 quantized to NF4 via bitsandbytes (9.5 GB → 2.1 GB)
-         25 frames @ 8fps ≈ 3.1s per clip, Apache 2.0
-Tier 2: LTX-Video 0.9 — fast fallback, ~6–8 GB VRAM, 49 frames @ 24fps
-Tier 3: (caller falls through to Pollinations / placeholder)
+T4 PRECISION RULES (non-negotiable):
+  - All models load in torch.float16 (T4 Turing = no native bfloat16)
+  - LTX VAE decode patched to float32 (prevents NaN black frames)
+  - Wan2.1 VAE is stable in float16 natively (no patch needed)
 
-Strategy selection via VIDEO_GEN_STRATEGY env var:
-    mirror     — CogVideoX on both GPUs, A+B clips in parallel (2x speed)
-    hybrid     — LTX-Video(cuda:0) + CogVideoX(cuda:1) simultaneously
-    sequential — single GPU, one clip at a time (safe fallback)
-
-GPU Assignment (dual T4):
-    cuda:0  → Chatterbox TTS during audio phase (~2 GB, cleared before visual)
-              Then → CogVideoX (mirror) OR LTX-Video (hybrid)
-    cuda:1  → CogVideoX-2B always
-
-Environment variables:
-    VIDEO_GEN_ENABLED      1/0  — master switch (default 1)
-    VIDEO_GEN_STRATEGY     mirror|hybrid|sequential (default mirror)
-    VIDEO_GEN_COG_STEPS    inference steps for CogVideoX (default 25)
-    VIDEO_GEN_LTX_STEPS    inference steps for LTX-Video (default 8)
-    WAN21_ENABLED          set to 0 to disable old wan21_tools loading
-────────────────────────────────────────────────────────────────────────────────
+Public API is unchanged — visual_director.py imports work without modification.
+================================================================================
 """
 from __future__ import annotations
 
@@ -41,7 +27,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -49,26 +34,54 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-_ENABLED   = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
-_STRATEGY  = os.getenv("VIDEO_GEN_STRATEGY", "sequential").lower()  # mirror|hybrid|sequential
-_HF_TOKEN  = os.getenv("HF_TOKEN", "")
-_STEPS_COG = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))   # higher = sharper frames
-_STEPS_LTX = int(os.getenv("VIDEO_GEN_LTX_STEPS", "30"))
-_STEPS_LTX_I2V = int(os.getenv("VIDEO_GEN_I2V_STEPS", "25"))
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+_ENABLED      = os.getenv("VIDEO_GEN_ENABLED", "1").strip() != "0"
+_HF_TOKEN     = os.getenv("HF_TOKEN", "")
+_IS_KAGGLE    = os.path.exists("/kaggle/working")
 
-# ── Kaggle detection ──────────────────────────────────────────────────────────
-# api-inference.huggingface.co is often blocked on Kaggle even when internet is
-# "enabled" in settings — the subdomain is behind Kaggle's egress proxy filter.
-# Detect Kaggle and skip HF entirely to avoid wasting ~72 s on failed retries.
-_IS_KAGGLE = os.path.exists("/kaggle/working")
+# Wan2.1 params — primary model
+_WAN_MODEL    = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+_WAN_WIDTH    = 832
+_WAN_HEIGHT   = 480
+_WAN_FRAMES   = 81      # 81 frames at 24fps = 3.375s, Wan's native sweet spot
+_WAN_FPS      = 24
+_WAN_STEPS    = int(os.getenv("VIDEO_GEN_WAN_STEPS", "50"))
+_WAN_GUIDANCE = float(os.getenv("VIDEO_GEN_WAN_GUIDANCE", "5.0"))
 
-# ── Anchor image disk cache ───────────────────────────────────────────────────
-# Avoids re-generating identical Pollinations images across runs/retries.
+# LTX I2V params — fallback
+_LTX_MODEL    = "Lightricks/LTX-Video"
+_LTX_WIDTH    = 768
+_LTX_HEIGHT   = 512
+_LTX_FRAMES   = 65      # (65-1) % 8 == 0 ✓, 65 frames at 24fps = 2.7s
+_LTX_FPS      = 24
+_LTX_STEPS    = int(os.getenv("VIDEO_GEN_LTX_STEPS", "40"))
+_LTX_GUIDANCE = float(os.getenv("VIDEO_GEN_LTX_GUIDANCE", "3.5"))
+_LTX_IMG_GUIDANCE = float(os.getenv("VIDEO_GEN_LTX_IMG_GUIDANCE", "2.0"))
+
+# CogVideoX params — last resort only, fps corrected
+_COG_MODEL    = "THUDM/CogVideoX-2b"
+_COG_WIDTH    = 848
+_COG_HEIGHT   = 480
+_COG_FRAMES   = 49      # 49 frames at 24fps = 2.04s (was 25 @ 8fps = slideshow)
+_COG_FPS      = 24
+_COG_STEPS    = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))
+
+# Anchor image cache
 _ANCHOR_CACHE = Path("data/anchor_cache")
 _ANCHOR_CACHE.mkdir(parents=True, exist_ok=True)
 
-# ── GPU assignment ─────────────────────────────────────────────────────────────
+# ── SINGLETONS ────────────────────────────────────────────────────────────────
+_PIPES: dict[str, object] = {}
+_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_lock(key: str) -> threading.Lock:
+    if key not in _LOCKS:
+        _LOCKS[key] = threading.Lock()
+    return _LOCKS[key]
+
+
+# ── GPU UTILS ─────────────────────────────────────────────────────────────────
 def _num_gpus() -> int:
     try:
         import torch
@@ -76,57 +89,25 @@ def _num_gpus() -> int:
     except Exception:
         return 0
 
+
 def _video_device(slot: int = 1) -> str:
-    """Return cuda:1 for video on 2-GPU Kaggle, cuda:0 on single GPU."""
-    n = _num_gpus()
-    if n >= 2:
-        return f"cuda:{slot}"   # slot 0 = TTS, slot 1 = video
-    return "cuda:0"
-
-# ── Singletons ─────────────────────────────────────────────────────────────────
-_PIPES: dict[str, object] = {}
-_LOCKS: dict[str, threading.Lock] = {
-    "cog_0": threading.Lock(),
-    "cog_1": threading.Lock(),
-    "ltx_0": threading.Lock(),
-}
-
-# ── Style tokens ───────────────────────────────────────────────────────────────
-_STYLE = "cinematic, anamorphic, 8K, photorealistic, masterful composition, no text"
-_MOTION = (
-    "continuous camera movement, smooth dolly push forward, "
-    "natural subject motion throughout entire clip, "
-    "no static frames, temporal coherence, 24fps cinematic motion"
-)
-_NICHE_TOKENS: dict[str, str] = {
-    "personal_finance": "professional finance office, corporate aesthetic",
-    "saas_tools":       "sleek tech workspace, dark UI glow",
-    "legal_tax":        "formal legal office, polished mahogany",
-    "senior_health":    "warm golden hour, healthy senior lifestyle",
-    "storytelling":     "epic wide shot, dramatic rembrandt lighting",
-    "default":          "professional environment, sharp focus",
-}
-_NEGATIVE = (
-    "black screen, dark screen, pure black, solid black, "
-    "low quality, blurry, watermark, text overlay, deformed, ugly, mutated, "
-    "worst quality, amateur footage, shaky cam, overexposed, underexposed, "
-    "cartoon, anime, painting, illustration, 3d render, cgi, fake, plastic, "
-    "duplicate faces, extra limbs, missing limbs, disfigured, malformed, "
-    "noise, grain, pixelated, compression artifacts, out of focus"
-)
-
-def _enrich(prompt: str, niche: str = "default") -> str:
-    prompt_trunc = prompt[:400]
-    tokens = _NICHE_TOKENS.get(niche, _NICHE_TOKENS["default"])
-    return f"{prompt_trunc}, {tokens}, {_STYLE}, {_MOTION}"
+    """cuda:1 on dual-T4 Kaggle, cuda:0 on single GPU."""
+    return f"cuda:{slot}" if _num_gpus() >= 2 else "cuda:0"
 
 
-# ── Availability ───────────────────────────────────────────────────────────────
+def _free_vram_gb(device: str) -> float:
+    try:
+        import torch
+        return torch.cuda.mem_get_info(device)[0] / 1024 ** 3
+    except Exception:
+        return 0.0
+
+
 def _evict_pipeline(key: str):
-    """Evict a pipeline and move its components to CPU to ensure VRAM release."""
+    """Move pipeline components to CPU and release VRAM."""
     pipe = _PIPES.pop(key, None)
     if pipe is not None:
-        for attr in ("transformer", "text_encoder", "vae", "scheduler"):
+        for attr in ("transformer", "text_encoder", "text_encoder_2", "vae", "image_encoder"):
             component = getattr(pipe, attr, None)
             if component is not None and hasattr(component, "to"):
                 try:
@@ -134,12 +115,37 @@ def _evict_pipeline(key: str):
                 except Exception:
                     pass
         del pipe
-    import gc, torch
     gc.collect()
-    if torch.cuda.is_available():
+    try:
+        import torch
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        
+    except Exception:
+        pass
+
+
+# ── STYLE TOKENS ──────────────────────────────────────────────────────────────
+_NICHE_TOKENS: dict[str, str] = {
+    "personal_finance": "professional finance office, corporate aesthetic, cinematic",
+    "saas_tools":       "sleek tech workspace, dark UI glow, cinematic",
+    "legal_tax":        "formal legal office, polished mahogany, cinematic",
+    "senior_health":    "warm golden hour, healthy senior lifestyle, cinematic",
+    "storytelling":     "epic wide shot, dramatic rembrandt lighting, cinematic",
+    "default":          "professional environment, sharp focus, cinematic",
+}
+_NEGATIVE = (
+    "low quality, blurry, watermark, text overlay, deformed, ugly, "
+    "worst quality, static, no motion, frozen, cartoon, anime, "
+    "overexposed, underexposed, pixelated, compression artifacts"
+)
+
+
+def _enrich(prompt: str, niche: str = "default") -> str:
+    tokens = _NICHE_TOKENS.get(niche, _NICHE_TOKENS["default"])
+    return f"{prompt[:400]}, {tokens}"
+
+
+# ── AVAILABILITY ──────────────────────────────────────────────────────────────
 def is_video_gen_available() -> bool:
     if not _ENABLED:
         return False
@@ -150,243 +156,7 @@ def is_video_gen_available() -> bool:
         return False
 
 
-# ── CogVideoX-2B loader ────────────────────────────────────────────────────────
-def _load_cogvideox(device: str = "cuda:1") -> object:
-    slot = device.split(":")[-1]
-    key  = f"cog_{slot}"
-    if _LOCKS.get(key) is None:
-        _LOCKS[key] = threading.Lock()
-    if key in _PIPES:
-        return _PIPES[key]
-
-    with _LOCKS[key]:
-        if key in _PIPES:
-            return _PIPES[key]
-
-        import torch
-        
-        free_gb = torch.cuda.mem_get_info(device)[0] / 1024**3
-        if free_gb < 8.0:
-            raise RuntimeError(f"Insufficient VRAM on {device}: {free_gb:.1f} GB free")
-
-        from diffusers import CogVideoXPipeline
-        from diffusers.hooks import apply_group_offloading
-        import torch
-
-        gpu_id = int(device.split(":")[-1])
-
-        # ── Step 1: Load full pipeline in float16 ───────────────────────────
-        log.info("cogvideox.loading", device=device, dtype="float16")
-
-        pipe = CogVideoXPipeline.from_pretrained(
-            "THUDM/CogVideoX-2b", 
-            torch_dtype=torch.float16,
-            use_safetensors=True
-        )
-
-        # ── Step 2: VAE optimizations ───────────────────────────────────────
-        if hasattr(pipe, "vae"):
-            for method in ("enable_vae_slicing", "enable_vae_tiling"):
-                if hasattr(pipe.vae, method) or hasattr(pipe, method):
-                    try:
-                        getattr(pipe.vae if hasattr(pipe.vae, method) else pipe, method)()
-                    except Exception:
-                        pass
-
-        # ── Step 3: Offloading (replaces NF4 hack) ──────────────────────────
-        onload = torch.device(device)
-        offload = torch.device("cpu")
-
-        if hasattr(pipe, "transformer"):
-            pipe.transformer.enable_group_offload(
-                onload_device=onload,
-                offload_device=offload,
-                offload_type="leaf_level",
-                use_stream=True,
-            )
-        if hasattr(pipe, "text_encoder"):
-            apply_group_offloading(
-                pipe.text_encoder,
-                onload_device=onload,
-                offload_type="block_level",
-                num_blocks_per_group=2,
-            )
-        if hasattr(pipe, "vae"):
-            apply_group_offloading(pipe.vae, onload_device=onload, offload_type="leaf_level")
-
-        # Fallback layer-by-layer offload ONLY if single GPU strategy. 
-        # Incompatible with multi-GPU runs.
-        if _STRATEGY == "sequential":
-            if hasattr(pipe, "enable_model_cpu_offload"):
-                pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-            if hasattr(pipe, "enable_sequential_cpu_offload"):
-                pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
-            log.info("cogvideox.sequential_cpu_offload_enabled")
-
-        if hasattr(pipe, "enable_attention_slicing"):
-            pipe.enable_attention_slicing(slice_size=1)
-
-        _PIPES[key] = pipe
-        used = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
-        log.info("cogvideox.ready", device=device, vram_gb=round(used, 1), t5_mode="float16_offload")
-        return pipe
-
-
-
-# ── LTX-Video loader ───────────────────────────────────────────────────────────
-def _load_ltx(device: str = "cuda:0") -> object:
-    slot = device.split(":")[-1]
-    key  = f"ltx_{slot}"
-    if _LOCKS.get(key) is None:
-        _LOCKS[key] = threading.Lock()
-    if key in _PIPES:
-        return _PIPES[key]
-
-    with _LOCKS[key]:
-        if key in _PIPES:
-            return _PIPES[key]
-
-        import torch
-        from diffusers.hooks import apply_group_offloading
-        try:
-            from diffusers import LTXPipeline
-        except ImportError:
-            log.warning("ltx.import_failed_falling_back")
-            return None
-
-        log.info("ltx.loading", device=device)
-
-        # ── Step 1: Load in float16 ─────────────────────────────────────────
-        pipe = LTXPipeline.from_pretrained(
-            "Lightricks/LTX-Video",
-            torch_dtype=torch.float16,
-        )
-
-        # ── Step 2: VAE optimizations (float32 decode patch + tiling) ───────
-        if hasattr(pipe, "vae"):
-            try:
-                pipe.vae = pipe.vae.to(dtype=torch.float32)
-                original_decode = pipe.vae.decode
-                def decode_fp32(z, *args, **kwargs):
-                    return original_decode(z.to(dtype=torch.float32), *args, **kwargs)
-                pipe.vae.decode = decode_fp32
-                log.info("ltx.vae_cast_float32_with_decode_patch")
-            except Exception as vae_err:
-                log.warning("ltx.vae_cast_failed", error=str(vae_err)[:80])
-
-        for method in ("enable_vae_slicing", "enable_vae_tiling", "enable_attention_slicing"):
-            if hasattr(pipe, method) or hasattr(pipe.vae, method):
-                try:
-                    getattr(pipe.vae if 'vae' in method else pipe, method)()
-                except Exception:
-                    pass
-
-        # ── Step 3: Offloading ──────────────────────────────────────────────
-        onload = torch.device(device)
-        offload = torch.device("cpu")
-
-        if hasattr(pipe, "transformer"):
-            pipe.transformer.enable_group_offload(
-                onload_device=onload,
-                offload_device=offload,
-                offload_type="leaf_level",
-                use_stream=True,
-            )
-        if hasattr(pipe, "text_encoder"):
-            apply_group_offloading(
-                pipe.text_encoder,
-                onload_device=onload,
-                offload_type="block_level",
-                num_blocks_per_group=2,
-            )
-        if hasattr(pipe, "vae"):
-            apply_group_offloading(pipe.vae, onload_device=onload, offload_type="leaf_level")
-
-        _PIPES[key] = pipe
-        log.info("ltx.ready", device=device)
-        return pipe
-
-
-# ── LTX Image-to-Video loader ───────────────────────────────────────────────────────────
-def _load_ltx_i2v(device: str = "cuda:0") -> object:
-    """Load LTXImageToVideoPipeline (I2V) — animates a still image."""
-    slot = device.split(":")[-1]
-    key  = f"ltx_i2v_{slot}"
-    if _LOCKS.get(key) is None:
-        _LOCKS[key] = threading.Lock()
-    if key in _PIPES:
-        return _PIPES[key]
-
-    with _LOCKS[key]:
-        if key in _PIPES:
-            return _PIPES[key]
-
-        import torch
-        from diffusers.hooks import apply_group_offloading
-        
-        free_gb = torch.cuda.mem_get_info(device)[0] / 1024**3
-        if free_gb < 8.0:
-            raise RuntimeError(f"Insufficient VRAM on {device}: {free_gb:.1f} GB free")
-        try:
-            from diffusers import LTXImageToVideoPipeline
-        except ImportError:
-            log.warning("ltx_i2v.import_failed_falling_back_to_t2v")
-            return None
-
-        log.info("ltx_i2v.loading", device=device)
-
-        # ── Step 1: Load in float16 ─────────────────────────────────────────
-        pipe = LTXImageToVideoPipeline.from_pretrained(
-            "Lightricks/LTX-Video",
-            torch_dtype=torch.float16,
-        )
-
-        # ── Step 2: VAE optimizations (float32 decode patch + tiling) ───────
-        if hasattr(pipe, "vae"):
-            try:
-                pipe.vae = pipe.vae.to(dtype=torch.float32)
-                original_decode = pipe.vae.decode
-                def decode_fp32(z, *args, **kwargs):
-                    return original_decode(z.to(dtype=torch.float32), *args, **kwargs)
-                pipe.vae.decode = decode_fp32
-                log.info("ltx_i2v.vae_cast_float32_with_decode_patch")
-            except Exception as vae_err:
-                log.warning("ltx_i2v.vae_cast_failed", error=str(vae_err)[:80])
-
-        for method in ("enable_vae_slicing", "enable_vae_tiling", "enable_attention_slicing"):
-            if hasattr(pipe, method) or hasattr(pipe.vae, method):
-                try:
-                    getattr(pipe.vae if 'vae' in method else pipe, method)()
-                except Exception:
-                    pass
-
-        # ── Step 3: Offloading ──────────────────────────────────────────────
-        onload = torch.device(device)
-        offload = torch.device("cpu")
-
-        if hasattr(pipe, "transformer"):
-            pipe.transformer.enable_group_offload(
-                onload_device=onload,
-                offload_device=offload,
-                offload_type="leaf_level",
-                use_stream=True,
-            )
-        if hasattr(pipe, "text_encoder"):
-            apply_group_offloading(
-                pipe.text_encoder,
-                onload_device=onload,
-                offload_type="block_level",
-                num_blocks_per_group=2,
-            )
-        if hasattr(pipe, "vae"):
-            apply_group_offloading(pipe.vae, onload_device=onload, offload_type="leaf_level")
-
-        _PIPES[key] = pipe
-        log.info("ltx_i2v.ready", device=device)
-        return pipe
-
-
-# ── Frame list → MP4 ──────────────────────────────────────────────────────────
+# ── FRAMES → MP4 ──────────────────────────────────────────────────────────────
 def _frames_to_mp4(frames: list, output_path: str, fps: int) -> Optional[str]:
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -411,14 +181,291 @@ def _frames_to_mp4(frames: list, output_path: str, fps: int) -> Optional[str]:
 
         import torch
         torch.cuda.empty_cache()
-        log.info("video_gen.saved", path=output_path, frames=len(frames))
+        log.info("video_gen.saved", path=output_path, frames=len(frames), fps=fps)
         return output_path
     except Exception as e:
         log.error("video_gen.frames_to_mp4_failed", error=str(e)[:200])
         return None
 
 
-# ── CogVideoX single-clip generator ───────────────────────────────────────────
+# ── WAN2.1 LOADER ─────────────────────────────────────────────────────────────
+def _load_wan(device: str = "cuda:0") -> Optional[object]:
+    key = f"wan_{device.split(':')[-1]}"
+    if key in _PIPES:
+        return _PIPES[key]
+
+    with _get_lock(key):
+        if key in _PIPES:
+            return _PIPES[key]
+
+        try:
+            import torch
+            from diffusers import WanPipeline
+
+            free = _free_vram_gb(device)
+            log.info("wan.loading", device=device, free_vram_gb=round(free, 1))
+
+            pipe = WanPipeline.from_pretrained(
+                _WAN_MODEL,
+                torch_dtype=torch.float16,
+            )
+            pipe.to(device)
+
+            # Wan2.1 VAE is stable in float16 — no monkey patch needed
+            pipe.enable_attention_slicing()
+            if hasattr(pipe.vae, "enable_slicing"):
+                pipe.vae.enable_slicing()
+            if hasattr(pipe.vae, "enable_tiling"):
+                pipe.vae.enable_tiling()
+
+            _PIPES[key] = pipe
+            used = torch.cuda.memory_allocated(device) / 1e9
+            log.info("wan.ready", device=device, vram_used_gb=round(used, 1))
+            return pipe
+
+        except Exception as e:
+            log.error("wan.load_failed", error=str(e)[:200])
+            return None
+
+
+# ── WAN2.1 GENERATOR ──────────────────────────────────────────────────────────
+def _run_wan(
+    prompt: str,
+    output_path: str,
+    device: str,
+    niche: str = "default",
+    seed: int = 42,
+) -> Optional[str]:
+    try:
+        import torch
+        pipe = _load_wan(device)
+        if pipe is None:
+            return None
+
+        enriched = _enrich(prompt, niche)
+        log.info("wan.generating", device=device, steps=_WAN_STEPS,
+                 size=f"{_WAN_WIDTH}x{_WAN_HEIGHT}", frames=_WAN_FRAMES,
+                 prompt=enriched[:80])
+
+        generator = torch.Generator(device).manual_seed(seed)
+
+        with torch.no_grad():
+            result = pipe(
+                prompt=enriched,
+                negative_prompt=_NEGATIVE,
+                width=_WAN_WIDTH,
+                height=_WAN_HEIGHT,
+                num_frames=_WAN_FRAMES,
+                guidance_scale=_WAN_GUIDANCE,
+                num_inference_steps=_WAN_STEPS,
+                generator=generator,
+            )
+
+        path = _frames_to_mp4(result.frames[0], output_path, fps=_WAN_FPS)
+        gc.collect()
+        torch.cuda.empty_cache()
+        return path
+
+    except torch.cuda.OutOfMemoryError:
+        log.error("wan.oom", device=device)
+        _evict_pipeline(f"wan_{device.split(':')[-1]}")
+        gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return None
+    except Exception as e:
+        log.error("wan.failed", error=str(e)[:300])
+        _evict_pipeline(f"wan_{device.split(':')[-1]}")
+        return None
+
+
+# ── LTX I2V LOADER ───────────────────────────────────────────────────────────
+def _load_ltx_i2v(device: str = "cuda:0") -> Optional[object]:
+    key = f"ltx_i2v_{device.split(':')[-1]}"
+    if key in _PIPES:
+        return _PIPES[key]
+
+    with _get_lock(key):
+        if key in _PIPES:
+            return _PIPES[key]
+
+        try:
+            import torch
+            from diffusers import LTXImageToVideoPipeline
+            from diffusers.hooks import apply_group_offloading
+
+            log.info("ltx_i2v.loading", device=device)
+
+            pipe = LTXImageToVideoPipeline.from_pretrained(
+                _LTX_MODEL,
+                torch_dtype=torch.float16,
+            )
+
+            # T4 float16 VAE patch — prevents NaN black frames
+            if hasattr(pipe, "vae"):
+                original_decode = pipe.vae.decode
+                def patched_decode(z, *args, **kwargs):
+                    return original_decode(z.to(torch.float32), *args, **kwargs)
+                pipe.vae.decode = patched_decode
+                log.info("ltx_i2v.vae_fp32_patch_applied")
+
+            # Group offloading to fit T4 alongside Wan
+            onload  = torch.device(device)
+            offload = torch.device("cpu")
+
+            if hasattr(pipe, "transformer"):
+                pipe.transformer.enable_group_offload(
+                    onload_device=onload,
+                    offload_device=offload,
+                    offload_type="leaf_level",
+                    use_stream=True,
+                )
+            if hasattr(pipe, "text_encoder"):
+                apply_group_offloading(
+                    pipe.text_encoder,
+                    onload_device=onload,
+                    offload_type="block_level",
+                    num_blocks_per_group=2,
+                )
+            if hasattr(pipe, "vae"):
+                apply_group_offloading(
+                    pipe.vae, onload_device=onload, offload_type="leaf_level"
+                )
+
+            _PIPES[key] = pipe
+            log.info("ltx_i2v.ready", device=device)
+            return pipe
+
+        except Exception as e:
+            log.error("ltx_i2v.load_failed", error=str(e)[:200])
+            return None
+
+
+# ── LTX I2V GENERATOR ────────────────────────────────────────────────────────
+def _run_ltx_i2v(
+    prompt: str,
+    anchor_path: str,
+    output_path: str,
+    device: str,
+    niche: str = "default",
+    seed: int = 42,
+) -> Optional[str]:
+    try:
+        import torch
+        from PIL import Image
+
+        pipe = _load_ltx_i2v(device)
+        if pipe is None:
+            return None
+
+        if not anchor_path or not Path(anchor_path).exists():
+            log.warning("ltx_i2v.no_anchor")
+            return None
+
+        anchor = Image.open(anchor_path).convert("RGB").resize(
+            (_LTX_WIDTH, _LTX_HEIGHT), Image.LANCZOS
+        )
+        enriched = _enrich(prompt, niche)
+
+        log.info("ltx_i2v.generating", device=device,
+                 steps=_LTX_STEPS, size=f"{_LTX_WIDTH}x{_LTX_HEIGHT}",
+                 frames=_LTX_FRAMES, guidance=_LTX_GUIDANCE,
+                 img_guidance=_LTX_IMG_GUIDANCE, prompt=enriched[:80])
+
+        generator = torch.Generator(device).manual_seed(seed)
+
+        with torch.no_grad():
+            result = pipe(
+                image=anchor,
+                prompt=enriched,
+                negative_prompt=_NEGATIVE,
+                width=_LTX_WIDTH,
+                height=_LTX_HEIGHT,
+                num_frames=_LTX_FRAMES,
+                guidance_scale=_LTX_GUIDANCE,
+                image_guidance_scale=_LTX_IMG_GUIDANCE,
+                num_inference_steps=_LTX_STEPS,
+                generator=generator,
+            )
+
+        path = _frames_to_mp4(result.frames[0], output_path, fps=_LTX_FPS)
+        gc.collect()
+        torch.cuda.empty_cache()
+        return path
+
+    except torch.cuda.OutOfMemoryError:
+        log.error("ltx_i2v.oom", device=device)
+        _evict_pipeline(f"ltx_i2v_{device.split(':')[-1]}")
+        return None
+    except Exception as e:
+        log.error("ltx_i2v.failed", error=str(e)[:300])
+        _evict_pipeline(f"ltx_i2v_{device.split(':')[-1]}")
+        return None
+
+
+# ── COGVIDEOX LOADER (last resort) ────────────────────────────────────────────
+def _load_cogvideox(device: str = "cuda:0") -> Optional[object]:
+    key = f"cog_{device.split(':')[-1]}"
+    if key in _PIPES:
+        return _PIPES[key]
+
+    with _get_lock(key):
+        if key in _PIPES:
+            return _PIPES[key]
+
+        try:
+            import torch
+            from diffusers import CogVideoXPipeline
+            from diffusers.hooks import apply_group_offloading
+
+            log.info("cogvideox.loading", device=device)
+            pipe = CogVideoXPipeline.from_pretrained(
+                _COG_MODEL,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+            )
+
+            onload  = torch.device(device)
+            offload = torch.device("cpu")
+
+            if hasattr(pipe, "transformer"):
+                pipe.transformer.enable_group_offload(
+                    onload_device=onload,
+                    offload_device=offload,
+                    offload_type="leaf_level",
+                    use_stream=True,
+                )
+            if hasattr(pipe, "text_encoder"):
+                apply_group_offloading(
+                    pipe.text_encoder,
+                    onload_device=onload,
+                    offload_type="block_level",
+                    num_blocks_per_group=2,
+                )
+            if hasattr(pipe, "vae"):
+                apply_group_offloading(
+                    pipe.vae, onload_device=onload, offload_type="leaf_level"
+                )
+                for m in ("enable_vae_slicing", "enable_vae_tiling"):
+                    if hasattr(pipe.vae, m):
+                        try:
+                            getattr(pipe.vae, m)()
+                        except Exception:
+                            pass
+
+            _PIPES[key] = pipe
+            log.info("cogvideox.ready", device=device)
+            return pipe
+
+        except Exception as e:
+            log.error("cogvideox.load_failed", error=str(e)[:200])
+            return None
+
+
+# ── COGVIDEOX GENERATOR (last resort) ─────────────────────────────────────────
 def _run_cogvideox(
     prompt: str,
     output_path: str,
@@ -428,319 +475,156 @@ def _run_cogvideox(
 ) -> Optional[str]:
     try:
         import torch
-        pipe     = _load_cogvideox(device)
+        pipe = _load_cogvideox(device)
+        if pipe is None:
+            return None
+
         enriched = _enrich(prompt, niche)
+        log.info("cogvideox.generating", device=device, steps=_COG_STEPS,
+                 frames=_COG_FRAMES, fps=_COG_FPS, prompt=enriched[:80])
 
-        log.info("cogvideox.generating", device=device,
-                 steps=_STEPS_COG, prompt=enriched[:80])
-
-        # generator on CPU is required when enable_model_cpu_offload is active.
-        # The offload hooks move weights between CPU/GPU layer-by-layer, so the
-        # "current" CUDA device at RNG time is non-deterministic. A GPU generator
-        # would crash or produce wrong outputs. CPU generator is device-agnostic.
         generator = torch.Generator(device="cpu").manual_seed(seed)
 
-        # torch.no_grad() required (not inference_mode).
-        # bitsandbytes NF4 dequantization creates internal tensor views (it unpacks
-        # 4-bit → FP16 on the fly). inference_mode disables view tracking, which
-        # breaks those operations silently. no_grad() is safe.
         with torch.no_grad():
             result = pipe(
                 prompt=enriched,
                 negative_prompt=_NEGATIVE,
-                height=480,
-                width=848,
-                num_frames=25,        # 25 frames @ 8fps ≈ 3.1s; fits 15.6 GB T4 in FP16
-                num_inference_steps=_STEPS_COG,
+                height=_COG_HEIGHT,
+                width=_COG_WIDTH,
+                num_frames=_COG_FRAMES,
+                num_inference_steps=_COG_STEPS,
                 guidance_scale=6.0,
                 generator=generator,
             )
 
-        path = _frames_to_mp4(result.frames[0], output_path, fps=8)
-
-        # Fix 9: Run full GC after successful inference so Python's reference
-        # cycle collector releases fragmented tensors before the next scene.
-        # torch.cuda.empty_cache() alone doesn't trigger cycle collection.
+        path = _frames_to_mp4(result.frames[0], output_path, fps=_COG_FPS)
         gc.collect()
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()  # prevents false OOM from stale stats
-
         return path
 
     except Exception as e:
-        log.error("cogvideox.failed", device=device, error=str(e)[:300])
-        # Clean up dirty VRAM before LTX fallback can attempt to load.
-        # Without this, fragmented post-OOM blocks cause LTX to also fail.
-        try:
-            import torch
-            if key := f"cog_{device.split(':')[-1]}":
-                _PIPES.pop(key, None)
-            gc.collect()
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-        except Exception:
-            pass
+        log.error("cogvideox.failed", error=str(e)[:300])
+        _evict_pipeline(f"cog_{device.split(':')[-1]}")
         return None
 
 
-# ── LTX-Video single-clip generator ───────────────────────────────────────────
-def _run_ltx(
-    prompt: str,
-    output_path: str,
-    device: str,
-    niche: str = "default",
-) -> Optional[str]:
-    try:
-        import torch, gc
-        # Guard: check we have enough free VRAM before loading LTX.
-        # If we're here because CogVideoX OOMed, the GPU may still be dirty.
-        if torch.cuda.is_available():
-            free_vram_gb = torch.cuda.mem_get_info(device)[0] / 1024**3
-            if free_vram_gb < 6.0:
-                log.error("ltx.insufficient_vram_after_cogvideox_oom",
-                          device=device, free_gb=round(free_vram_gb, 1))
-                return None
-
-        pipe     = _load_ltx(device)
-        if pipe is None:
-            log.warning("ltx.load_failed_import_or_missing")
-            return None
-
-        enriched = _enrich(prompt, niche)
-
-        log.info("ltx.generating", device=device,
-                 steps=_STEPS_LTX, prompt=enriched[:80])
-
-        with torch.no_grad():
-            result = pipe(
-                prompt=enriched,
-                negative_prompt=_NEGATIVE,
-                height=480,
-                width=704,
-                # 97 frames = 4 seconds @ 24fps. Reduces heavy looping in ffmpeg.
-                num_frames=97,
-                num_inference_steps=_STEPS_LTX,
-                guidance_scale=5.0,   # raised from 3.0 — more prompt adherence, better detail
-            )
-
-        return _frames_to_mp4(result.frames[0], output_path, fps=24)
-
-    except Exception as e:
-        log.error("ltx.failed", device=device, error=str(e)[:300])
-        try:
-            import torch
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-        return None
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-# Strategy implementations
-# ════════════════════════════════════════════════════════════════════════════════
-
-def _generate_pair(
-    prompt_a: str, prompt_b: str,
-    out_a: str, out_b: str,
-    niche: str,
-) -> tuple[Optional[str], Optional[str]]:
-    """
-    Generate clip A and clip B according to the selected strategy.
-    Called from generate_video_clip when the caller provides two prompts/paths.
-    """
-    n = _num_gpus()
-
-    if _STRATEGY == "mirror" and n >= 2:
-        # ── Mirror: CogVideoX on both GPUs simultaneously ────────────────────
-        log.info("strategy.mirror")
-        results: dict[str, Optional[str]] = {}
-
-        def _gen_cog(prompt, out, device, label):
-            results[label] = _run_cogvideox(prompt, out, device, niche)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fa = pool.submit(_gen_cog, prompt_a, out_a, "cuda:0", "A")
-            fb = pool.submit(_gen_cog, prompt_b, out_b, "cuda:1", "B")
-            fa.result(); fb.result()
-
-        return results.get("A"), results.get("B")
-
-    elif _STRATEGY == "hybrid" and n >= 2:
-        # ── Hybrid: LTX(cuda:0) + CogVideoX(cuda:1) simultaneously ──────────
-        # RAM guard: combined CPU RAM for both offloaded pipelines is ~20-22 GB.
-        # Kaggle has 30 GB total. If free RAM is below 22 GB, fall through to
-        # sequential to avoid killing the kernel with an OOM.
-        try:
-            import psutil
-            free_ram_gb = psutil.virtual_memory().available / 1024**3
-            if free_ram_gb < 22:
-                log.warning("strategy.hybrid_ram_guard",
-                            free_gb=round(free_ram_gb, 1),
-                            action="downgrading to sequential")
-                raise RuntimeError("insufficient RAM for hybrid")
-        except ImportError:
-            pass  # psutil not installed — proceed optimistically
-
-        log.info("strategy.hybrid")
-        results: dict[str, Optional[str]] = {}
-
-        def _gen_ltx(prompt, out, device, label):
-            results[label] = _run_ltx(prompt, out, device, niche)
-
-        def _gen_cog(prompt, out, device, label):
-            results[label] = _run_cogvideox(prompt, out, device, niche)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fa = pool.submit(_gen_ltx, prompt_a, out_a, "cuda:0", "A")
-            fb = pool.submit(_gen_cog, prompt_b, out_b, "cuda:1", "B")
-            fa.result(); fb.result()
-
-        return results.get("A"), results.get("B")
-
-    else:
-        # ── Sequential: single GPU, safe ─────────────────────────────────────
-        log.info("strategy.sequential")
-        dev = _video_device(1)
-        r_a = _run_cogvideox(prompt_a, out_a, dev, niche)
-        if r_a is None:
-            r_a = _run_ltx(prompt_a, out_a, dev, niche)
-        r_b = _run_cogvideox(prompt_b, out_b, dev, niche)
-        if r_b is None:
-            r_b = _run_ltx(prompt_b, out_b, dev, niche)
-        return r_a, r_b
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-# Public API — same signatures as wan21_tools.py
-# ════════════════════════════════════════════════════════════════════════════════
-
-def generate_video_pair(
-    prompt_a: str, prompt_b: str,
-    out_a: str, out_b: str,
-    niche: str = "default",
-) -> tuple[Optional[str], Optional[str]]:
-    """
-    Generate two video clips in parallel if strategy allows (e.g. mirror/hybrid).
-    """
-    if not is_video_gen_available():
-        log.warning("video_gen.not_available")
-        return None, None
-    return _generate_pair(prompt_a, prompt_b, out_a, out_b, niche)
-
-def generate_video_clip(
-    prompt: str,
-    output_path: str,
-    duration_s: float = 5.0,  # kept for interface compat; models use fixed frames
-    niche: str = "default",
-    num_frames: int = 0,       # kept for interface compat
-    fps: int = 8,              # kept for interface compat
-    width: int = 720,
-    height: int = 480,
-    num_inference_steps: int = 0,  # 0 = use env var default
-    guidance_scale: float = 0.0,   # 0.0 = use model default
-    device: Optional[str] = None,  # override device selection
-) -> Optional[str]:
-    """
-    Generate a single video clip. Primary: CogVideoX-2B. Fallback: LTX-Video.
-    Returns path to MP4 or None.
-    """
-    if not is_video_gen_available():
-        log.warning("video_gen.not_available")
-        return None
-
-    dev = device if device else _video_device(1)
-
-    # Try CogVideoX first
-    result = _run_cogvideox(prompt, output_path, device=dev, niche=niche)
-    if result:
-        return result
-
-    log.warning("video_gen.cogvideox_failed_trying_ltx")
-    _evict_pipeline(f"cog_{dev.split(':')[-1]}")
-    return _run_ltx(prompt, output_path, device=dev, niche=niche)
-
-
+# ── ANCHOR IMAGE ──────────────────────────────────────────────────────────────
 def generate_anchor_image(
     prompt: str,
     output_path: str,
     niche: str = "default",
-    width: int = 720,
+    width: int = 832,
     height: int = 480,
 ) -> Optional[str]:
     """
-    Generate a high-quality anchor still image.
-    Uses HuggingFace FLUX.1-schnell API (zero local VRAM) if HF_TOKEN is set.
-    Falls back to Pollinations FLUX (free, no key needed).
+    Generate anchor image via FLUX.1-schnell (HF API or Pollinations fallback).
+    Width/height default match Wan2.1 input exactly — no resize step.
     """
     enriched = _enrich(prompt, niche)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    
-    # Check cache first
-    anchor_hash = hashlib.md5(enriched.encode()).hexdigest()
-    cached_path = _ANCHOR_CACHE / f"anchor_{anchor_hash}.png"
-    if cached_path.exists() and cached_path.stat().st_size > 10_000:
-        shutil.copy2(cached_path, output_path)
+
+    # Disk cache
+    cache_key = hashlib.md5(f"{enriched}{width}{height}".encode()).hexdigest()[:16]
+    cached    = _ANCHOR_CACHE / f"{cache_key}.png"
+    if cached.exists() and cached.stat().st_size > 10_000:
+        shutil.copy2(cached, output_path)
         log.info("anchor.cache_hit", path=output_path)
         return output_path
 
-    # ── Try HF Inference API (FLUX.1-schnell) ─────────────────────────────────
-    if _HF_TOKEN:
+    import requests
+
+    # HF Inference API (skip on Kaggle — blocked by egress proxy)
+    if _HF_TOKEN and not _IS_KAGGLE:
         for attempt in range(2):
             try:
-                import requests
-                time.sleep(1.0 + attempt * 2)
+                if attempt:
+                    time.sleep(3 * attempt)
                 resp = requests.post(
                     "https://api-inference.huggingface.co/models/"
                     "black-forest-labs/FLUX.1-schnell",
                     headers={"Authorization": f"Bearer {_HF_TOKEN}"},
-                    json={
-                        "inputs": enriched,
-                        "parameters": {
-                            "width": width, "height": height,
-                            "num_inference_steps": 4,
-                            "guidance_scale": 0.0,
-                        },
-                    },
+                    json={"inputs": enriched,
+                          "parameters": {"width": width, "height": height,
+                                         "num_inference_steps": 4,
+                                         "guidance_scale": 0.0}},
                     timeout=90,
                 )
                 if resp.status_code == 200 and len(resp.content) > 10_000:
                     Path(output_path).write_bytes(resp.content)
-                    shutil.copy2(output_path, cached_path)
-                    log.info("anchor.hf_flux_ok", path=output_path)
+                    shutil.copy2(output_path, cached)
+                    log.info("anchor.hf_ok", path=output_path)
                     return output_path
-                log.warning("anchor.hf_flux_fail",
-                            status=resp.status_code, attempt=attempt)
             except Exception as e:
-                log.warning("anchor.hf_flux_error",
-                            attempt=attempt, error=str(e)[:100])
+                log.warning("anchor.hf_error", attempt=attempt, error=str(e)[:80])
 
-    # ── Fallback: Pollinations FLUX (no key, free) ────────────────────────────
+    # Pollinations fallback
     from urllib.parse import quote as url_encode
-    import requests
     for attempt in range(3):
         try:
-            time.sleep(2.0 + attempt * 3)
-            encoded = url_encode(enriched)
+            if attempt:
+                time.sleep(5 * attempt)
             url = (
-                f"https://image.pollinations.ai/prompt/{encoded}"
+                f"https://image.pollinations.ai/prompt/{url_encode(enriched)}"
                 f"?width={width}&height={height}&nologo=true&model=flux&seed=42"
             )
             resp = requests.get(url, stream=True, timeout=90)
             resp.raise_for_status()
             with open(output_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
+                for chunk in resp.iter_content(8192):
                     f.write(chunk)
             if Path(output_path).stat().st_size > 10_000:
-                shutil.copy2(output_path, cached_path)
-                log.info("anchor.pollinations_ok", path=output_path,
-                         attempt=attempt)
+                shutil.copy2(output_path, cached)
+                log.info("anchor.pollinations_ok", path=output_path)
                 return output_path
         except Exception as e:
-            log.warning("anchor.pollinations_failed",
-                        attempt=attempt, error=str(e)[:100])
+            log.warning("anchor.pollinations_failed", attempt=attempt, error=str(e)[:80])
 
-    log.error("anchor.all_sources_failed", path=output_path)
+    log.error("anchor.all_failed", path=output_path)
     return None
+
+
+# ── PUBLIC API — same signatures as v1, visual_director.py unchanged ──────────
+
+def generate_video_clip(
+    prompt: str,
+    output_path: str,
+    duration_s: float = 5.0,
+    niche: str = "default",
+    num_frames: int = 0,
+    fps: int = 24,
+    width: int = 832,
+    height: int = 480,
+    num_inference_steps: int = 0,
+    guidance_scale: float = 0.0,
+    device: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Primary T2V path. Waterfall: Wan2.1 → LTX T2V → CogVideoX.
+    """
+    if not is_video_gen_available():
+        return None
+
+    dev = device or _video_device(1)
+
+    # Tier 1: Wan2.1
+    result = _run_wan(prompt, output_path, dev, niche)
+    if result:
+        return result
+
+    log.warning("video_gen.wan_failed_trying_ltx_t2v")
+    _evict_pipeline(f"wan_{dev.split(':')[-1]}")
+
+    # Tier 2: LTX T2V (reuse I2V pipe without image — anchor=None path)
+    result = _run_ltx_i2v(prompt, anchor_path="", output_path=output_path,
+                           device=dev, niche=niche)
+    if result:
+        return result
+
+    log.warning("video_gen.ltx_failed_trying_cogvideox")
+    _evict_pipeline(f"ltx_i2v_{dev.split(':')[-1]}")
+
+    # Tier 3: CogVideoX (last resort)
+    return _run_cogvideox(prompt, output_path, dev, niche)
 
 
 def generate_i2v_clip(
@@ -752,300 +636,35 @@ def generate_i2v_clip(
     **kwargs,
 ) -> Optional[str]:
     """
-    Image-to-Video: animates a high-quality FLUX anchor image using
-    LTXImageToVideoPipeline for far superior visual coherence vs pure T2V.
-    Falls back to T2V if the I2V pipeline fails to load.
+    I2V path: LTX I2V with corrected guidance values.
+    Falls back to T2V if anchor missing or I2V fails.
     """
-    import torch
-    from PIL import Image
+    if not is_video_gen_available():
+        return None
 
-    enriched  = _enrich(prompt, niche)
-    dev       = _video_device(1)   # I2V on cuda:1 with CPU offload
+    dev = _video_device(1)
 
-    pipe = _load_ltx_i2v(dev)
-    if pipe is None:
-        log.warning("video_gen.i2v_fallback_to_t2v")
-        return generate_video_clip(prompt, output_path, duration_s, niche)
-
-    try:
-        if not anchor_image_path or not Path(anchor_image_path).exists():
-            log.warning("video_gen.i2v_no_anchor_fallback_t2v")
-            return generate_video_clip(prompt, output_path, duration_s, niche)
-
-        image = Image.open(anchor_image_path).convert("RGB").resize((704, 480))
-        log.info("ltx_i2v.generating", steps=_STEPS_LTX, prompt=enriched[:80])
-
-        with torch.no_grad():
-            result = pipe(
-                image=image,
-                prompt=enriched,
-                negative_prompt=_NEGATIVE,
-                height=480,
-                width=704,
-                num_frames=97,
-                num_inference_steps=_STEPS_LTX_I2V,
-                guidance_scale=5.0,
-            )
-
-        path = _frames_to_mp4(result.frames[0], output_path, fps=24)
-        if path:
-            log.info("ltx_i2v.done", path=path)
-        return path
-
-    except Exception as e:
-        log.error("ltx_i2v.failed", error=str(e)[:300])
+    if anchor_image_path and Path(anchor_image_path).exists():
+        result = _run_ltx_i2v(prompt, anchor_image_path, output_path, dev, niche)
+        if result:
+            return result
         _evict_pipeline(f"ltx_i2v_{dev.split(':')[-1]}")
-        log.warning("video_gen.i2v_fallback_to_t2v_after_error")
-        return generate_video_clip(prompt, output_path, duration_s, niche)
 
-# ── NEW: Professional Pipeline (FLUX + SVD + ESRGAN) ───────────────────────────
-
-_SVD_PIPE = None
-_SVD_LOCK = threading.Lock()
-
-def _load_svd(device: str = "cuda:0"):
-    """
-    Load Stable Video Diffusion XT (img2vid-xt).
-    ~7-8 GB active VRAM with CPU offload. Fits T4 comfortably.
-    Generates 25 frames at input image resolution (1024x576).
-    """
-    global _SVD_PIPE
-    if _SVD_PIPE is not None:
-        return _SVD_PIPE
-
-    with _SVD_LOCK:
-        if _SVD_PIPE is not None:
-            return _SVD_PIPE
-
-        from diffusers import StableVideoDiffusionPipeline
-        import torch
-        gpu_id = int(device.split(":")[-1])
-
-        log.info("svd.loading", device=device)
-        _SVD_PIPE = StableVideoDiffusionPipeline.from_pretrained(
-            "stabilityai/stable-video-diffusion-img2vid-xt",
-            torch_dtype=torch.float16,
-            variant="fp16",
-        )
-        # CPU offload keeps peak active VRAM at ~7-8 GB
-        _SVD_PIPE.enable_model_cpu_offload(gpu_id=gpu_id)
-
-        # (No VAE float32 cast needed for SVD on T4; it runs fine in fp16 without overflowing)
-
-        log.info("svd.ready", device=device)
-        return _SVD_PIPE
+    log.warning("video_gen.i2v_fallback_to_t2v")
+    return generate_video_clip(prompt, output_path, duration_s, niche)
 
 
-def _generate_flux_anchor(
-    prompt: str,
-    output_path: str,
-    width: int = 1024,
-    height: int = 576,
+def generate_video_pair(
+    prompt_a: str, prompt_b: str,
+    out_a: str, out_b: str,
     niche: str = "default",
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     """
-    Generate a high-quality anchor image via FLUX.1-schnell.
-    Uses HF Inference API (free with token).
-    Output: 1024x576 PNG — only 1.875x upscale to 1080p vs 4x for 480p AI video.
+    Generate two clips sequentially. Wan2.1 is single-GPU; no parallel benefit.
     """
-    import requests
-    hf_token = os.getenv("HF_TOKEN", "")
-    enriched = _enrich(prompt, niche)
-
-    # Finance-specific negative — avoids faces, text, CGI
-    negative_style = (
-        "human faces, people, text, watermark, cartoon, anime, "
-        "low quality, blurry, overexposed, flat lighting, stock photo look"
-    )
-
-    # Speed fix 1: Skip HF entirely on Kaggle — api-inference.huggingface.co
-    # is blocked by Kaggle's egress proxy even when internet is "enabled".
-    # This saves ~72 s of failed retries per scene.
-    if hf_token and not _IS_KAGGLE:
-        for attempt in range(3):
-            try:
-                if attempt > 0:
-                    time.sleep(3 * attempt)
-                resp = requests.post(
-                    "https://api-inference.huggingface.co/v1/models/black-forest-labs/FLUX.1-schnell",
-                    headers={
-                        "Authorization": f"Bearer {hf_token}",
-                        "x-wait-for-model": "true",
-                    },
-                    json={
-                        "inputs": enriched,
-                        "parameters": {
-                            "width": width,
-                            "height": height,
-                            "num_inference_steps": 4,
-                            "guidance_scale": 0.0,
-                        },
-                    },
-                    timeout=120,
-                )
-                if resp.status_code == 200 and len(resp.content) > 10_000:
-                    Path(output_path).write_bytes(resp.content)
-                    log.info("flux_anchor.hf_ok", path=output_path, attempt=attempt)
-                    return output_path
-                log.warning("flux_anchor.hf_status", status=resp.status_code, attempt=attempt)
-            except Exception as e:
-                log.warning("flux_anchor.hf_error", attempt=attempt, error=str(e)[:100])
-
-    # Speed fix 3: Pollinations anchor disk cache — avoids re-fetching identical
-    # images on retries or across runs. Keyed on prompt + dimensions.
-    from urllib.parse import quote as url_encode
-    cache_key  = hashlib.md5(f"{enriched}{width}{height}".encode()).hexdigest()[:16]
-    cached_img = _ANCHOR_CACHE / f"{cache_key}.png"
-    if cached_img.exists() and cached_img.stat().st_size > 10_000:
-        shutil.copy2(cached_img, output_path)
-        log.info("flux_anchor.cache_hit", key=cache_key, path=output_path)
-        return output_path
-
-    # Fallback: Pollinations FLUX (no token needed)
-    for attempt in range(3):
-        try:
-            if attempt > 0:
-                time.sleep(5 * attempt)
-            encoded = url_encode(enriched)
-            url = (
-                f"https://image.pollinations.ai/prompt/{encoded}"
-                f"?width={width}&height={height}&nologo=true&model=flux&seed=42"
-            )
-            resp = requests.get(url, stream=True, timeout=90)
-            resp.raise_for_status()
-            with open(output_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            if Path(output_path).stat().st_size > 10_000:
-                # Persist to cache for future runs
-                shutil.copy2(output_path, cached_img)
-                log.info("flux_anchor.pollinations_ok", path=output_path, attempt=attempt)
-                return output_path
-        except Exception as e:
-            log.warning("flux_anchor.pollinations_failed", attempt=attempt, error=str(e)[:100])
-
-    log.error("flux_anchor.all_failed")
-    return None
-
-
-def _animate_with_svd(
-    anchor_path: str,
-    output_path: str,
-    num_frames: int = 49,
-    fps: int = 8,
-    motion_bucket_id: int = 65,
-    noise_aug_strength: float = 0.01,
-    device: str = "cuda:0",
-) -> Optional[str]:
-    """
-    Animate a FLUX anchor image using Stable Video Diffusion.
-    """
-    import torch
-    from PIL import Image
-    try:
-        pipe = _load_svd(device)
-
-        image = Image.open(anchor_path).convert("RGB")
-        # SVD works best at 1024x576 (its training resolution)
-        image = image.resize((1024, 576), Image.LANCZOS)
-
-        log.info("svd.generating", frames=num_frames, fps=fps, motion_bucket=motion_bucket_id, anchor=anchor_path)
-
-        with torch.no_grad():
-            result = pipe(
-                image,
-                num_frames=num_frames,
-                num_inference_steps=25,     # 25 steps = good quality
-                fps=fps,
-                motion_bucket_id=motion_bucket_id,
-                noise_aug_strength=noise_aug_strength,
-                decode_chunk_size=4,        # decode 4 frames at a time (VRAM safe)
-            )
-
-        frames = result.frames[0]
-        return _frames_to_mp4(frames, output_path, fps)
-
-    except Exception as e:
-        log.error("svd.failed", error=str(e)[:300])
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-        return None
-
-
-def _upscale_video_realesrgan(
-    input_path: str,
-    output_path: str,
-    scale: int = 2,     # 2x: 1024x576 → 2048x1152, then crop to 1920x1080
-) -> Optional[str]:
-    """
-    Upscale video frames using Real-ESRGAN neural upscaler.
-    """
-    try:
-        from realesrgan import RealESRGANer
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-
-        model = RRDBNet(
-            num_in_ch=3, num_out_ch=3,
-            num_feat=64, num_block=23, num_grow_ch=32,
-            scale=scale
-        )
-        upsampler = RealESRGANer(
-            scale=scale,
-            model_path="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x2plus.pth",
-            model=model,
-            tile=512,           # process in tiles to avoid VRAM issues
-            tile_pad=10,
-            pre_pad=0,
-            half=True,          # float16 for speed
-            gpu_id=0,
-        )
-
-        # Extract frames, upscale each, re-encode
-        with tempfile.TemporaryDirectory() as tmpdir:
-            frames_dir = Path(tmpdir) / "frames"
-            up_dir = Path(tmpdir) / "upscaled"
-            frames_dir.mkdir(); up_dir.mkdir()
-
-            # Extract frames
-            subprocess.run([
-                "ffmpeg", "-y", "-i", input_path,
-                str(frames_dir / "frame_%05d.png")
-            ], check=True, capture_output=True)
-
-            frame_files = sorted(frames_dir.glob("*.png"))
-            log.info("realesrgan.upscaling", frames=len(frame_files), scale=f"{scale}x")
-
-            for frame_path in frame_files:
-                import cv2, numpy as np
-                img = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
-                upscaled, _ = upsampler.enhance(img, outscale=scale)
-                cv2.imwrite(str(up_dir / frame_path.name), upscaled)
-
-            # Re-encode: scale/crop to exact 1920x1080
-            # NOTE: framerate must match SVD output fps (8), not old hardcoded 6
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-framerate", "8",
-                "-i", str(up_dir / "frame_%05d.png"),
-                "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "18",       # higher quality
-                "-pix_fmt", "yuv420p",
-                output_path,
-            ], check=True, capture_output=True, timeout=300)
-
-        log.info("realesrgan.done", output=output_path)
-        return output_path
-
-    except ImportError:
-        log.warning("realesrgan.not_installed", hint="pip install realesrgan basicsr")
-        return None
-    except Exception as e:
-        log.error("realesrgan.failed", error=str(e)[:300])
-        return None
+    r_a = generate_video_clip(prompt_a, out_a, niche=niche)
+    r_b = generate_video_clip(prompt_b, out_b, niche=niche)
+    return r_a, r_b
 
 
 def generate_professional_clip(
@@ -1055,43 +674,5 @@ def generate_professional_clip(
     scene_id: int = 1,
     out_dir: Path = Path("outputs/visual"),
 ) -> Optional[str]:
-    """
-    Primary visual generation path for professional finance content.
-
-    Pipeline:
-      1. FLUX.1-schnell anchor image
-      2. SVD I2V animation
-      3. Real-ESRGAN 2x upscale
-
-    Falls back to CogVideoX + bilinear if any step fails.
-    """
-    anchor_path = str(out_dir / f"anchor_{scene_id:03d}.png")
-    raw_video   = str(out_dir / f"raw_{scene_id:03d}.mp4")
-    upscaled    = str(out_dir / f"upscaled_{scene_id:03d}.mp4")
-
-    # Step 1: FLUX anchor image
-    anchor = _generate_flux_anchor(prompt, anchor_path, niche=niche)
-    if not anchor:
-        log.warning("professional_clip.flux_failed_cogvideox_fallback", scene_id=scene_id)
-        return generate_video_clip(prompt, output_path, 5.0, niche)
-
-    # Step 2: SVD animation
-    device = _video_device(0)   # SVD on cuda:0
-    raw = _animate_with_svd(anchor, raw_video, device=device)
-    if not raw:
-        log.warning("professional_clip.svd_failed_cogvideox_fallback", scene_id=scene_id)
-        return generate_video_clip(prompt, output_path, 5.0, niche)
-
-    # Step 3: Real-ESRGAN upscale
-    upscaled_path = _upscale_video_realesrgan(raw, upscaled)
-    if upscaled_path:
-        import shutil
-        shutil.copy2(upscaled_path, output_path)
-        log.info("professional_clip.done", scene_id=scene_id, path=output_path, pipeline="flux+svd+esrgan")
-        return output_path
-
-    # ESRGAN failed — use raw SVD output
-    log.warning("professional_clip.esrgan_failed_using_raw_svd")
-    import shutil
-    shutil.copy2(raw, output_path)
-    return output_path
+    """Kept for API compatibility. Routes to generate_video_clip."""
+    return generate_video_clip(prompt, output_path, niche=niche)

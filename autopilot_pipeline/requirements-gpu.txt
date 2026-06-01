@@ -1,59 +1,74 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# requirements-gpu.txt — Kaggle T4 x2 GPU-specific packages
+# requirements-gpu.txt
+# Kaggle T4 GPU-specific packages
+# Install AFTER requirements.txt
 #
-# Install AFTER requirements.txt:
-#   pip install -r requirements-gpu.txt
+# VRAM BUDGET — Dual T4 (15.36 GB each):
 #
-# VRAM budget on Kaggle 2x T4 (15.6 GB each, 31.2 GB total):
-#   GPU 0 (cuda:0): Chatterbox TTS       ~2.0 GB  (cleared after each scene)
-#                   OR CogVideoX (mirror strategy)
-#   GPU 1 (cuda:1): CogVideoX-2B         ~9 GB peak (NF4 T5 + fp16 Transformer)
-#   ────────────────────────────────────────────────────────────────
-#   CogVideoX memory breakdown:
-#     T5 text encoder (NF4):   ~2.1 GB  (was 9.5 GB fp16 — saves 7.4 GB!)
-#     Transformer (fp16):      ~4.0 GB
-#     VAE + peak activations:  ~3.0 GB
-#     Total peak:              ~9 GB  ✓
+#   cuda:0  Chatterbox TTS during audio phase    ~2.0 GB
+#           (evicted before visual generation begins)
 #
-# CRITICAL: T4 (Turing) does NOT natively support bfloat16 — it is emulated.
-#           All models loaded in torch.float16 for real T4 speed.
+#   cuda:0  Wan2.1 T2V-1.3B during visual phase  ~8.2 GB active
+#           (no group offloading needed — fits cleanly with 7 GB headroom)
 #
-# VIDEO MODEL DISK USAGE (downloaded to Kaggle /root/.cache):
-#   CogVideoX-2B:   ~5 GB  (primary)
-#   LTX-Video:      ~9 GB  (fast fallback — loads ONLY if CogVideoX fails)
-#   Do NOT preload both simultaneously — Kaggle disk limit is ~57 GB.
-# ─────────────────────────────────────────────────────────────────────────────
+#   cuda:0  LTX-Video I2V fallback               ~9-10 GB with group offloading
+#           (only loaded if Wan2.1 fails; Wan is evicted first)
+#
+#   cuda:0  CogVideoX-2B last resort             ~10-11 GB with group offloading
+#           (only loaded if both Wan and LTX fail)
+#
+# MODEL DISK USAGE (/root/.cache on Kaggle, ~57 GB limit):
+#   Wan2.1 T2V-1.3B:  ~3 GB   (primary — always downloaded)
+#   LTX-Video:        ~9 GB   (fallback — downloaded on first failure)
+#   CogVideoX-2B:     ~5 GB   (last resort — downloaded on second failure)
+#   Total worst case: ~17 GB  — well within Kaggle disk limit
+#
+# CRITICAL — T4 precision rules:
+#   T4 (Turing sm_75) has NO native bfloat16 support.
+#   bfloat16 on T4 triggers slow software emulation (~4x slower).
+#   All models MUST load in torch.float16.
+#   LTX VAE decode patched to float32 to prevent NaN black frames.
+#   Wan2.1 VAE is stable in float16 natively — no patch needed.
+#
+# REMOVED vs v1:
+#   bitsandbytes    — no longer needed (Wan2.1 fits T4 without NF4 quantization)
+#   torchao         — removed (caused crashes, never needed for Wan2.1)
+#   mirror strategy — removed (Wan2.1 is single-model; parallel pair gen
+#                     gives no benefit vs sequential on one T4)
 
-# ── PyTorch (pre-installed on Kaggle — listed for local dev only) ───────────
+# ── PyTorch (pre-installed on Kaggle — listed for local dev reference) ────────
 torch>=2.3.0
 torchaudio>=2.3.0
 
-# ── Diffusers (CogVideoX + LTX-Video generation) ────────────────────────────
-# CogVideoXPipeline requires diffusers 0.30+. LTXPipeline requires 0.32+.
+# ── Diffusers — must be 0.33+ for WanPipeline and LTXImageToVideoPipeline ─────
 diffusers>=0.33.0
 
-# transformers: CogVideoX works on 4.x and 5.x — no strict pin needed.
-# (Wan2.1 required 4.46.3 due to SDPA crash; CogVideoX has no such restriction)
-transformers>=4.40.0
+# ── Transformers — Wan2.1 works on 4.46.x and 5.x, no strict pin needed ───────
+# NOTE: chatterbox-tts requires transformers==4.46.3
+# kaggle_setup.py handles the pin via --force-reinstall after chatterbox install
+transformers>=4.46.0
 
-# bitsandbytes: NF4 quantization of CogVideoX's T5 text encoder.
-# Shrinks T5 from 9.5 GB (fp16) to ~2.1 GB (NF4), eliminating VRAM fragmentation.
-# Module-level quantization (bnb.Linear4bit) — fully compatible with accelerate
-# cpu_offload hooks (unlike torchao which is tensor-level and breaks .to(device)).
-bitsandbytes>=0.43.0
+# ── Accelerate — required for group offloading hooks in LTX and CogVideoX ─────
+accelerate>=0.34.2
 
-accelerate>=0.34.2           # fixed typo from 'accelearte'
-sentencepiece>=0.2.0         # tokenizer dependency
-imageio>=2.34.0              # frame export
-imageio-ffmpeg>=0.5.1
+# ── Safetensors — model weight loading ────────────────────────────────────────
+safetensors>=0.4.5
 
-# ── Chatterbox TTS (MIT, best free voice) ───────────────────────────────────
+# ── Sentencepiece — tokenizer for Wan2.1 T5 text encoder ─────────────────────
+sentencepiece>=0.2.0
+
+# ── Chatterbox TTS — Tier 1 TTS, GPU required, MIT licensed ──────────────────
+# Installed --no-deps in kaggle_setup.py to avoid transformers 5.x conflict
 chatterbox-tts>=0.1.0
 
-# ── ACE-Step music generation (MIT, Suno-quality) ───────────────────────────
-# Install from GitHub (pip package may lag behind releases):
-# pip install git+https://github.com/stepfun-ai/ACE-Step.git
-# Or if PyPI package is available:
+# ── Frame I/O ─────────────────────────────────────────────────────────────────
+imageio>=2.34.0
+imageio-ffmpeg>=0.5.1
+
+# ── ACE-Step music generation — MIT, Suno-quality, ~4 GB VRAM ────────────────
+# Install from GitHub if PyPI lags:
+# pip install git+https://github.com/stepfun-ai/ACE-Step.git --no-deps
 acestep>=0.1.0
+
+# ── Real-ESRGAN upscaling — 2x neural upscale before FFmpeg downscale ─────────
 realesrgan
 basicsr

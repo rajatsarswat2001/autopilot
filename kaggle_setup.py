@@ -159,11 +159,9 @@ _run("diffusers deps", _pip(
     "basicsr",
 ))
 
-# bitsandbytes: required for NF4 T5 quantization in CogVideoX loader.
-# As of bitsandbytes 0.43+, plain pip install delivers a manylinux_2_24 wheel
-# that works on Kaggle's Ubuntu 22.04 + CUDA 12.8 without a custom index URL.
-# Fallback wheel URL is included below in case the PyPI wheel fails.
-_ok_bnb = _run("bitsandbytes (NF4 T5 quantization)",
+# bitsandbytes no longer needed — Wan2.1 fits T4 without NF4 quantization
+# Kept as optional install only for CogVideoX last-resort fallback path
+_ok_bnb = _run("bitsandbytes (optional CogVideoX fallback)",
                 _pip("bitsandbytes"), critical=False)
 if not _ok_bnb:
     _run("bitsandbytes (fallback nightly wheel)",
@@ -241,10 +239,11 @@ print("\n[7/7] Verifying imports ...")
 
 
 def _check_diffusers(m):
-    """Verify diffusers has the pipelines we actually use."""
     missing = []
-    if not hasattr(m, "CogVideoXPipeline"):
-        missing.append("CogVideoXPipeline")
+    if not hasattr(m, "WanPipeline"):
+        missing.append("WanPipeline")
+    if not hasattr(m, "LTXImageToVideoPipeline"):
+        missing.append("LTXImageToVideoPipeline")
     if not hasattr(m, "LTXPipeline"):
         missing.append("LTXPipeline")
     if missing:
@@ -254,7 +253,7 @@ def _check_diffusers(m):
         )
     return (
         f"OK  (diffusers {m.__version__}, "
-        f"CogVideoXPipeline \u2713, LTXPipeline \u2713)"
+        f"WanPipeline \u2713, LTXImageToVideoPipeline \u2713)"
     )
 
 

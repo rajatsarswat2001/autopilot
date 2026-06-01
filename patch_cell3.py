@@ -41,7 +41,7 @@ NEW_CELL_3 = [
     "    'AUTOPILOT_AUTO_APPROVE': '1',\n",
     "    'AUDIO_PARALLEL_WORKERS': '1' if has_gpu else '4',   # sequential on GPU to avoid VRAM contention\n",
     "    'VISUAL_PARALLEL_WORKERS': '1' if has_gpu else '4',  # sequential on GPU for Wan2.1\n",
-    "    'WAN21_ENABLED':          '1' if has_gpu else '0',   # disable on CPU-only\n",
+    "    'VIDEO_GEN_ENABLED':          '1' if has_gpu else '0',   # disable on CPU-only\n",
     "    'LOG_LEVEL':              'INFO',\n",
     "    'FORMAT':                 'short',    # 'short' = 9:16 vertical (YouTube Shorts)\n",
     "}\n",

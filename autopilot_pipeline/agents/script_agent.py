@@ -59,8 +59,8 @@ RULES (non-negotiable):
    "welcome to", "don't forget to subscribe", "in this video".
 6. Each scene narration: 1–3 sentences, ≥ 10 words, conversational tone.
 7. Return ONLY valid JSON. No markdown fences, no preamble, no comments.
-8. Visual prompts MUST be highly detailed, photorealistic, and cinematic. You MUST include explicit ACTION VERBS and motion descriptors (e.g., "walking rapidly", "gesturing with hands", "camera pans left", "water flowing"). Do not describe static scenes.
-9. Visual prompts MUST describe continuous action that changes over time. Never describe a single frozen moment. Example: 'A businessman WALKS across a busy trading floor, traders GESTURING around him, camera TRACKING alongside him' not 'A businessman standing on a trading floor'.
+8. Visual prompts must be atmospheric and cinematographic \u2014 describe what a DP sees through a lens, not a checklist of requirements. Include scene mood, subject doing something specific, environment texture, and lighting feel. End with ', cinematic'.
+9. Subjects must be doing concrete specific actions (counting banknotes, signing a contract, gripping a phone) not generic ones (standing, looking, walking). The scene should feel like a film still that implies motion, not a stage direction.
 """
 
 _SCHEMA = """\
