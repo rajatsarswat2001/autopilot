@@ -1,41 +1,51 @@
 import json
 
-with open("autopilot_kaggle.ipynb", "r", encoding="utf-8") as f:
-    notebook = json.load(f)
+with open("autopilot_kaggle.ipynb", "r", encoding='utf-8') as f:
+    nb = json.load(f)
 
-for cell in notebook['cells']:
+for cell in nb['cells']:
     if cell['cell_type'] == 'code':
-        new_source = []
-        for line in cell['source']:
-            # Replace model_cpu_offload with sequential_cpu_offload
-            if "pipe.enable_model_cpu_offload" in line:
-                line = line.replace("enable_model_cpu_offload", "enable_sequential_cpu_offload")
-            
-            # Add attention_slicing right after cpu_offload
-            new_source.append(line)
-            if "enable_sequential_cpu_offload" in line:
-                new_source.append("    pipe.enable_attention_slicing(slice_size=1)\n")
-            
-            # Ensure VAE slicing/tiling is called on pipe.vae
-            if "if hasattr(pipe, 'enable_vae_slicing'): pipe.enable_vae_slicing()" in line:
-                new_source.remove(line)
-            elif "pipe.enable_vae_slicing()" in line:
-                new_source.remove(line)
-            elif "if hasattr(pipe, 'enable_vae_tiling'): pipe.enable_vae_tiling()" in line:
-                new_source.remove(line)
-            elif "pipe.enable_vae_tiling()" in line:
-                new_source.remove(line)
-        
-        # Add the VAE lines safely
-        if any("CogVideoXPipeline" in l for l in new_source):
-            idx = next((i for i, l in enumerate(new_source) if "print('      Running 5-step smoke test...')" in l), -1)
-            if idx != -1:
-                new_source.insert(idx, "    pipe.vae.enable_slicing()\n")
-                new_source.insert(idx, "    pipe.vae.enable_tiling()\n")
-        
-        cell['source'] = new_source
+        source = cell['source']
+        if source and "CELL 2 -- PRE-LOAD GPU MODELS IN SUBPROCESS" in source[1]:
+            # Patch Wan2.1 smoke test string to be an f-string
+            new_source = []
+            for line in source:
+                if 'wan_code = """\n' in line:
+                    new_source.append('    wan_code = f"""\n')
+                elif "pipe.to(f'cuda:{video_gpu_id}')\n" in line:
+                    new_source.append("pipe.to('cuda:{video_gpu_id}')\n")
+                elif "pipe.vae.enable_slicing()\n" in line:
+                    new_source.append(line)
+                    new_source.append("pipe.vae.enable_tiling()\n")
+                else:
+                    new_source.append(line)
+            cell['source'] = new_source
 
-with open("autopilot_kaggle.ipynb", "w", encoding="utf-8") as f:
-    json.dump(notebook, f, indent=1)
+        elif source and "CELL 3 — API KEYS & SETTINGS" in source[1]:
+            # Add step counts to settings
+            new_source = []
+            for line in source:
+                if "    'VIDEO_GEN_ENABLED':          '1' if has_gpu else '0',   # disable on CPU-only\n" in line:
+                    new_source.append(line)
+                    new_source.append("    'VIDEO_GEN_WAN_STEPS':    '50',\n")
+                    new_source.append("    'VIDEO_GEN_LTX_STEPS':    '40',\n")
+                    new_source.append("    'VIDEO_GEN_COG_STEPS':    '50',\n")
+                    new_source.append("    'DISABLE_STOCK':          '1',\n")
+                else:
+                    new_source.append(line)
+            cell['source'] = new_source
+            
+        elif source and "CELL 4 — RUN PIPELINE" in source[1]:
+            # Change free < 10 to free < 8
+            new_source = []
+            for line in source:
+                if "    if free < 10:\n" in line:
+                    new_source.append("    if free < 8:\n")
+                else:
+                    new_source.append(line)
+            cell['source'] = new_source
 
-print("Notebook patched for sequential offload, attention slicing, and VAE.")
+with open("autopilot_kaggle.ipynb", "w", encoding='utf-8') as f:
+    json.dump(nb, f, indent=1)
+
+print("Notebook patched successfully.")
