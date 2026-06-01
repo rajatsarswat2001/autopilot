@@ -392,7 +392,6 @@ def _run_ltx_i2v(
                 height=_LTX_HEIGHT,
                 num_frames=_LTX_FRAMES,
                 guidance_scale=_LTX_GUIDANCE,
-                image_guidance_scale=_LTX_IMG_GUIDANCE,
                 num_inference_steps=_LTX_STEPS,
                 generator=generator,
             )
