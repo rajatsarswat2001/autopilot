@@ -236,7 +236,8 @@ def _load_wan(device: str = "cuda:0") -> Optional[object]:
                 _WAN_MODEL,
                 torch_dtype=torch.float16,
             )
-            pipe.to(device)
+            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
+            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
 
             # Wan2.1 VAE is stable in float16 — no monkey patch needed
             pipe.enable_attention_slicing()
