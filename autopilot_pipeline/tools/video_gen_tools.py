@@ -165,8 +165,22 @@ def is_video_gen_available() -> bool:
 # ── FRAMES → MP4 ──────────────────────────────────────────────────────────────
 def _frames_to_mp4(frames: list, output_path: str, fps: int) -> Optional[str]:
     try:
+        from PIL import Image
+        import numpy as np
         with tempfile.TemporaryDirectory() as tmpdir:
             for i, frame in enumerate(frames):
+                if isinstance(frame, np.ndarray):
+                    if frame.dtype in [np.float32, np.float64]:
+                        frame = (frame * 255).astype(np.uint8)
+                    frame = Image.fromarray(frame)
+                elif hasattr(frame, 'cpu'):
+                    frame = frame.cpu().numpy()
+                    if frame.dtype in [np.float32, np.float64]:
+                        frame = (frame * 255).astype(np.uint8)
+                    if frame.ndim == 3 and frame.shape[0] == 3:
+                        frame = np.transpose(frame, (1, 2, 0))
+                    frame = Image.fromarray(frame)
+                
                 frame.save(str(Path(tmpdir) / f"frame_{i:05d}.png"))
 
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
