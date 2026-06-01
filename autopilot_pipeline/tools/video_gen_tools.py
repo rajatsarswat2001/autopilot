@@ -45,7 +45,7 @@ _WAN_WIDTH    = 832
 _WAN_HEIGHT   = 480
 _WAN_FRAMES   = 81      # 81 frames at 24fps = 3.375s, Wan's native sweet spot
 _WAN_FPS      = 24
-_WAN_STEPS    = int(os.getenv("VIDEO_GEN_WAN_STEPS", "50"))
+_WAN_STEPS    = int(os.getenv("VIDEO_GEN_WAN_STEPS", "20"))
 _WAN_GUIDANCE = float(os.getenv("VIDEO_GEN_WAN_GUIDANCE", "5.0"))
 
 # LTX I2V params — fallback
@@ -169,16 +169,17 @@ def _frames_to_mp4(frames: list, output_path: str, fps: int) -> Optional[str]:
         import numpy as np
         with tempfile.TemporaryDirectory() as tmpdir:
             for i, frame in enumerate(frames):
-                if isinstance(frame, np.ndarray):
-                    if frame.dtype in [np.float32, np.float64]:
-                        frame = (frame * 255).astype(np.uint8)
-                    frame = Image.fromarray(frame)
-                elif hasattr(frame, 'cpu'):
+                if hasattr(frame, 'cpu'):
                     frame = frame.cpu().numpy()
-                    if frame.dtype in [np.float32, np.float64]:
-                        frame = (frame * 255).astype(np.uint8)
-                    if frame.ndim == 3 and frame.shape[0] == 3:
+                if isinstance(frame, np.ndarray):
+                    if frame.ndim == 4:
+                        frame = frame[0]
+                    # channel-first → channel-last
+                    if frame.ndim == 3 and frame.shape[0] in (1, 3, 4) and frame.shape[-1] not in (1, 3, 4):
                         frame = np.transpose(frame, (1, 2, 0))
+                    # any float (including float16) → uint8
+                    if frame.dtype != np.uint8:
+                        frame = (np.clip(frame.astype(np.float32), 0.0, 1.0) * 255).astype(np.uint8)
                     frame = Image.fromarray(frame)
                 
                 frame.save(str(Path(tmpdir) / f"frame_{i:05d}.png"))
@@ -229,7 +230,7 @@ def _load_wan(device: str = "cuda:0") -> Optional[object]:
                 _WAN_MODEL,
                 torch_dtype=torch.float16,
             )
-            pipe.enable_model_cpu_offload(device=device)
+            pipe.to(device)
 
             # Wan2.1 VAE is stable in float16 — no monkey patch needed
             pipe.enable_attention_slicing()
@@ -332,28 +333,8 @@ def _load_ltx_i2v(device: str = "cuda:0") -> Optional[object]:
                 pipe.vae.decode = patched_decode
                 log.info("ltx_i2v.vae_fp32_patch_applied")
 
-            # Group offloading to fit T4 alongside Wan
-            onload  = torch.device(device)
-            offload = torch.device("cpu")
-
-            if hasattr(pipe, "transformer"):
-                pipe.transformer.enable_group_offload(
-                    onload_device=onload,
-                    offload_device=offload,
-                    offload_type="leaf_level",
-                    use_stream=True,
-                )
-            if hasattr(pipe, "text_encoder"):
-                apply_group_offloading(
-                    pipe.text_encoder,
-                    onload_device=onload,
-                    offload_type="block_level",
-                    num_blocks_per_group=2,
-                )
-            if hasattr(pipe, "vae"):
-                apply_group_offloading(
-                    pipe.vae, onload_device=onload, offload_type="leaf_level"
-                )
+            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
+            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
 
             _PIPES[key] = pipe
             log.info("ltx_i2v.ready", device=device)
@@ -447,33 +428,14 @@ def _load_cogvideox(device: str = "cuda:0") -> Optional[object]:
                 use_safetensors=True,
             )
 
-            onload  = torch.device(device)
-            offload = torch.device("cpu")
-
-            if hasattr(pipe, "transformer"):
-                pipe.transformer.enable_group_offload(
-                    onload_device=onload,
-                    offload_device=offload,
-                    offload_type="leaf_level",
-                    use_stream=True,
-                )
-            if hasattr(pipe, "text_encoder"):
-                apply_group_offloading(
-                    pipe.text_encoder,
-                    onload_device=onload,
-                    offload_type="block_level",
-                    num_blocks_per_group=2,
-                )
-            if hasattr(pipe, "vae"):
-                apply_group_offloading(
-                    pipe.vae, onload_device=onload, offload_type="leaf_level"
-                )
-                for m in ("enable_vae_slicing", "enable_vae_tiling"):
-                    if hasattr(pipe.vae, m):
-                        try:
-                            getattr(pipe.vae, m)()
-                        except Exception:
-                            pass
+            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
+            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
+            for m in ("enable_vae_slicing", "enable_vae_tiling"):
+                if hasattr(pipe.vae, m):
+                    try:
+                        getattr(pipe.vae, m)()
+                    except Exception:
+                        pass
 
             _PIPES[key] = pipe
             log.info("cogvideox.ready", device=device)
