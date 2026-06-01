@@ -444,12 +444,15 @@ def _load_cogvideox(device: str = "cuda:0") -> Optional[object]:
 
             gpu_id = int(device.split(':')[-1]) if ':' in device else 0
             pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-            for m in ("enable_vae_slicing", "enable_vae_tiling"):
-                if hasattr(pipe.vae, m):
-                    try:
-                        getattr(pipe.vae, m)()
-                    except Exception:
-                        pass
+            
+            if hasattr(pipe, "enable_vae_slicing"):
+                pipe.enable_vae_slicing()
+            if hasattr(pipe, "enable_vae_tiling"):
+                pipe.enable_vae_tiling()
+            elif hasattr(pipe.vae, "enable_slicing"):
+                pipe.vae.enable_slicing()
+                if hasattr(pipe.vae, "enable_tiling"):
+                    pipe.vae.enable_tiling()
 
             _PIPES[key] = pipe
             log.info("cogvideox.ready", device=device)
