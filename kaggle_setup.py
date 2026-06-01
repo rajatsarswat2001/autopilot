@@ -159,9 +159,8 @@ _run("diffusers deps", _pip(
     "basicsr",
 ))
 
-# bitsandbytes no longer needed — Wan2.1 fits T4 without NF4 quantization
-# Kept as optional install only for CogVideoX last-resort fallback path
-_ok_bnb = _run("bitsandbytes (optional CogVideoX fallback)",
+# bitsandbytes is REQUIRED for Wan2.1 — the UMT5-XXL text encoder (22 GB in float16) MUST be loaded in NF4 to fit on T4
+_ok_bnb = _run("bitsandbytes (required for Wan2.1 text encoder)",
                 _pip("bitsandbytes"), critical=False)
 if not _ok_bnb:
     _run("bitsandbytes (fallback nightly wheel)",
