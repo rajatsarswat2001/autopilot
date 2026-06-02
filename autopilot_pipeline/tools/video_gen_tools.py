@@ -237,10 +237,9 @@ def _load_wan(device: str = "cuda:0") -> Optional[object]:
                 torch_dtype=torch.float16,
             )
 
-            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
-
-            # FIX 1: sequential offload — moves one submodule at a time.
-            pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
+            # FIX 1: Running natively on GPU for max speed on A100 (40GB VRAM)
+            # No CPU offloading needed.
+            pipe.to(device)
 
             # FIX 2: slice_size=1 is mandatory — the default "auto" is a no-op
             pipe.enable_attention_slicing(slice_size=1)
