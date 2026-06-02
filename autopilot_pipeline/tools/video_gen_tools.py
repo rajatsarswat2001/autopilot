@@ -236,23 +236,36 @@ def _load_wan(device: str = "cuda:0") -> Optional[object]:
                 _WAN_MODEL,
                 torch_dtype=torch.float16,
             )
-            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
-            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
 
-            # Wan2.1 VAE is stable in float16 — no monkey patch needed
-            pipe.enable_attention_slicing()
+            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
+
+            # FIX 1: sequential offload — moves one submodule at a time.
+            pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
+
+            # FIX 2: slice_size=1 is mandatory — the default "auto" is a no-op
+            pipe.enable_attention_slicing(slice_size=1)
+
             if hasattr(pipe.vae, "enable_slicing"):
                 pipe.vae.enable_slicing()
             if hasattr(pipe.vae, "enable_tiling"):
                 pipe.vae.enable_tiling()
 
             _PIPES[key] = pipe
-            used = torch.cuda.memory_allocated(device) / 1e9
-            log.info("wan.ready", device=device, vram_used_gb=round(used, 1))
+            free_after = _free_vram_gb(device)
+            log.info("wan.ready", device=device, free_vram_gb_after=round(free_after, 1))
             return pipe
 
+        except torch.cuda.OutOfMemoryError as e:
+            # FIX 3: catch OOM explicitly so eviction fires correctly
+            log.error("wan.load_oom", device=device, error=str(e)[:200])
+            _evict_pipeline(f"wan_{device.split(':')[-1]}")
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            return None
         except Exception as e:
             log.error("wan.load_failed", error=str(e)[:200])
+            _evict_pipeline(f"wan_{device.split(':')[-1]}")
             return None
 
 
