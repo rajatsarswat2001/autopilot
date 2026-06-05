@@ -101,7 +101,9 @@ def _build_providers() -> list[dict[str, Any]]:
             "name": "ollama",
             "keys": ["ollama"],           # always available as last resort
             "base_url": "http://localhost:11434/v1",
-            "model": "llama3:8b-instruct-q4_K_M",
+            # mistral-nemo:12b (7.5 GB) -- far better JSON + cinematic prompt quality
+            # than llama3:8b. Fits on a single T4 after Chatterbox is released.
+            "model": "mistral-nemo:12b",
             "api_style": "openai",
         },
     ]
