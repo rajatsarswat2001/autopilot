@@ -51,23 +51,7 @@ _WAN_FPS      = 24
 _WAN_STEPS    = int(os.getenv("VIDEO_GEN_WAN_STEPS", "20"))
 _WAN_GUIDANCE = float(os.getenv("VIDEO_GEN_WAN_GUIDANCE", "5.0"))
 
-# LTX I2V params — fallback
-_LTX_MODEL    = "Lightricks/LTX-Video"
-_LTX_WIDTH    = 768
-_LTX_HEIGHT   = 512
-_LTX_FRAMES   = 65      # (65-1) % 8 == 0 ✓, 65 frames at 24fps = 2.7s
-_LTX_FPS      = 24
-_LTX_STEPS    = int(os.getenv("VIDEO_GEN_LTX_STEPS", "40"))
-_LTX_GUIDANCE = float(os.getenv("VIDEO_GEN_LTX_GUIDANCE", "3.5"))
-_LTX_IMG_GUIDANCE = float(os.getenv("VIDEO_GEN_LTX_IMG_GUIDANCE", "2.0"))
 
-# CogVideoX params — last resort only, fps corrected
-_COG_MODEL    = "THUDM/CogVideoX-2b"
-_COG_WIDTH    = 848
-_COG_HEIGHT   = 480
-_COG_FRAMES   = 49      # 49 frames at 24fps = 2.04s (was 25 @ 8fps = slideshow)
-_COG_FPS      = 24
-_COG_STEPS    = int(os.getenv("VIDEO_GEN_COG_STEPS", "50"))
 
 # Anchor image cache
 _ANCHOR_CACHE = Path("data/anchor_cache")
@@ -324,201 +308,7 @@ def _run_wan(
         return None
 
 
-# ── LTX I2V LOADER ───────────────────────────────────────────────────────────
-def _load_ltx_i2v(device: str = "cuda:0") -> Optional[object]:
-    key = f"ltx_i2v_{device.split(':')[-1]}"
-    if key in _PIPES:
-        return _PIPES[key]
 
-    with _get_lock(key):
-        if key in _PIPES:
-            return _PIPES[key]
-
-        try:
-            import torch
-            from diffusers import LTXImageToVideoPipeline
-            from diffusers.hooks import apply_group_offloading
-
-            log.info("ltx_i2v.loading", device=device)
-
-            pipe = LTXImageToVideoPipeline.from_pretrained(
-                _LTX_MODEL,
-                torch_dtype=torch.float16,
-            )
-
-            # Force entire pipeline to float16, then patch VAE to float32
-            pipe = pipe.to(torch.float16)
-            
-            # Now patch VAE to float32 for stable decode
-            pipe.vae = pipe.vae.to(torch.float32)
-            original_decode = pipe.vae.decode
-            
-            def patched_decode(z, *args, **kwargs):
-                return original_decode(z.to(torch.float32), *args, **kwargs)
-            
-            pipe.vae.decode = patched_decode
-            
-            # Also cast text encoder biases to float16 explicitly
-            if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
-                pipe.text_encoder = pipe.text_encoder.to(torch.float16)
-
-            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
-            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-
-            _PIPES[key] = pipe
-            log.info("ltx_i2v.ready", device=device)
-            return pipe
-
-        except Exception as e:
-            log.error("ltx_i2v.load_failed", error=str(e)[:200])
-            return None
-
-
-# ── LTX I2V GENERATOR ────────────────────────────────────────────────────────
-def _run_ltx_i2v(
-    prompt: str,
-    anchor_path: str,
-    output_path: str,
-    device: str,
-    niche: str = "default",
-    seed: int = 42,
-) -> Optional[str]:
-    try:
-        import torch
-        from PIL import Image
-
-        pipe = _load_ltx_i2v(device)
-        if pipe is None:
-            return None
-
-        if not anchor_path or not Path(anchor_path).exists():
-            log.warning("ltx_i2v.no_anchor")
-            return None
-
-        anchor = Image.open(anchor_path).convert("RGB").resize(
-            (_LTX_WIDTH, _LTX_HEIGHT), Image.LANCZOS
-        )
-        enriched = _enrich(prompt, niche)
-
-        log.info("ltx_i2v.generating", device=device,
-                 steps=_LTX_STEPS, size=f"{_LTX_WIDTH}x{_LTX_HEIGHT}",
-                 frames=_LTX_FRAMES, guidance=_LTX_GUIDANCE,
-                 img_guidance=_LTX_IMG_GUIDANCE, prompt=enriched[:80])
-
-        generator = torch.Generator(device).manual_seed(seed)
-
-        with torch.no_grad():
-            result = pipe(
-                image=anchor,
-                prompt=enriched,
-                negative_prompt=_NEGATIVE,
-                width=_LTX_WIDTH,
-                height=_LTX_HEIGHT,
-                num_frames=_LTX_FRAMES,
-                guidance_scale=_LTX_GUIDANCE,
-                num_inference_steps=_LTX_STEPS,
-                generator=generator,
-            )
-
-        path = _frames_to_mp4(result.frames[0], output_path, fps=_LTX_FPS)
-        gc.collect()
-        torch.cuda.empty_cache()
-        return path
-
-    except torch.cuda.OutOfMemoryError:
-        log.error("ltx_i2v.oom", device=device)
-        _evict_pipeline(f"ltx_i2v_{device.split(':')[-1]}")
-        return None
-    except Exception as e:
-        log.error("ltx_i2v.failed", error=str(e)[:300])
-        _evict_pipeline(f"ltx_i2v_{device.split(':')[-1]}")
-        return None
-
-
-# ── COGVIDEOX LOADER (last resort) ────────────────────────────────────────────
-def _load_cogvideox(device: str = "cuda:0") -> Optional[object]:
-    key = f"cog_{device.split(':')[-1]}"
-    if key in _PIPES:
-        return _PIPES[key]
-
-    with _get_lock(key):
-        if key in _PIPES:
-            return _PIPES[key]
-
-        try:
-            import torch
-            from diffusers import CogVideoXPipeline
-            from diffusers.hooks import apply_group_offloading
-
-            log.info("cogvideox.loading", device=device)
-            pipe = CogVideoXPipeline.from_pretrained(
-                _COG_MODEL,
-                torch_dtype=torch.float16,
-                use_safetensors=True,
-            )
-
-            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
-            pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-            
-            if hasattr(pipe, "enable_vae_slicing"):
-                pipe.enable_vae_slicing()
-            if hasattr(pipe, "enable_vae_tiling"):
-                pipe.enable_vae_tiling()
-            elif hasattr(pipe.vae, "enable_slicing"):
-                pipe.vae.enable_slicing()
-                if hasattr(pipe.vae, "enable_tiling"):
-                    pipe.vae.enable_tiling()
-
-            _PIPES[key] = pipe
-            log.info("cogvideox.ready", device=device)
-            return pipe
-
-        except Exception as e:
-            log.error("cogvideox.load_failed", error=str(e)[:200])
-            return None
-
-
-# ── COGVIDEOX GENERATOR (last resort) ─────────────────────────────────────────
-def _run_cogvideox(
-    prompt: str,
-    output_path: str,
-    device: str,
-    niche: str = "default",
-    seed: int = 42,
-) -> Optional[str]:
-    try:
-        import torch
-        pipe = _load_cogvideox(device)
-        if pipe is None:
-            return None
-
-        enriched = _enrich(prompt, niche)
-        log.info("cogvideox.generating", device=device, steps=_COG_STEPS,
-                 frames=_COG_FRAMES, fps=_COG_FPS, prompt=enriched[:80])
-
-        generator = torch.Generator(device="cpu").manual_seed(seed)
-
-        with torch.no_grad():
-            result = pipe(
-                prompt=enriched,
-                negative_prompt=_NEGATIVE,
-                height=_COG_HEIGHT,
-                width=_COG_WIDTH,
-                num_frames=_COG_FRAMES,
-                num_inference_steps=_COG_STEPS,
-                guidance_scale=6.0,
-                generator=generator,
-            )
-
-        path = _frames_to_mp4(result.frames[0], output_path, fps=_COG_FPS)
-        gc.collect()
-        torch.cuda.empty_cache()
-        return path
-
-    except Exception as e:
-        log.error("cogvideox.failed", error=str(e)[:300])
-        _evict_pipeline(f"cog_{device.split(':')[-1]}")
-        return None
 
 
 # ── ANCHOR IMAGE ──────────────────────────────────────────────────────────────
@@ -569,28 +359,6 @@ def generate_anchor_image(
                     return output_path
             except Exception as e:
                 log.warning("anchor.hf_error", attempt=attempt, error=str(e)[:80])
-
-    # Pollinations fallback
-    from urllib.parse import quote as url_encode
-    for attempt in range(3):
-        try:
-            if attempt:
-                time.sleep(5 * attempt)
-            url = (
-                f"https://image.pollinations.ai/prompt/{url_encode(enriched)}"
-                f"?width={width}&height={height}&nologo=true&model=flux&seed=42"
-            )
-            resp = requests.get(url, stream=True, timeout=90)
-            resp.raise_for_status()
-            with open(output_path, "wb") as f:
-                for chunk in resp.iter_content(8192):
-                    f.write(chunk)
-            if Path(output_path).stat().st_size > 10_000:
-                shutil.copy2(output_path, cached)
-                log.info("anchor.pollinations_ok", path=output_path)
-                return output_path
-        except Exception as e:
-            log.warning("anchor.pollinations_failed", attempt=attempt, error=str(e)[:80])
 
     log.error("anchor.all_failed", path=output_path)
     return None
@@ -665,34 +433,17 @@ def generate_video_clip(
 
     dev = device or _video_device(1)
 
-    if _FORCED_MODEL == "cogvideox":
-        return _run_cogvideox(prompt, output_path, dev, niche)
-    elif _FORCED_MODEL == "wan21":
+    if _FORCED_MODEL == "wan21":
         return _run_wan(prompt, output_path, dev, niche)
     elif _FORCED_MODEL == "wan22_gguf":
         return _generate_wangp_clip(prompt, output_path, niche)
-    elif _FORCED_MODEL == "ltx":
-        return _run_ltx_i2v(prompt, anchor_path="", output_path=output_path, device=dev, niche=niche)
 
     # Tier 1: Wan2.1
     result = _run_wan(prompt, output_path, dev, niche)
     if result:
         return result
 
-    log.warning("video_gen.wan_failed_trying_ltx_t2v")
-    _evict_pipeline(f"wan_{dev.split(':')[-1]}")
-
-    # Tier 2: LTX T2V (reuse I2V pipe without image — anchor=None path)
-    result = _run_ltx_i2v(prompt, anchor_path="", output_path=output_path,
-                           device=dev, niche=niche)
-    if result:
-        return result
-
-    log.warning("video_gen.ltx_failed_trying_cogvideox")
-    _evict_pipeline(f"ltx_i2v_{dev.split(':')[-1]}")
-
-    # Tier 3: CogVideoX (last resort)
-    return _run_cogvideox(prompt, output_path, dev, niche)
+    return None
 
 
 def generate_i2v_clip(

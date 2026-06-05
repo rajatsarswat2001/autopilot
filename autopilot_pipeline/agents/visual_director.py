@@ -145,24 +145,16 @@ def _source_asset(
                     duration_s=duration_s,
                     niche=niche,
                 )
-                src = "ltx"
+                src = "wan21_i2v"
             
             if not result:
-                # Evict I2V pipeline to free VRAM before loading CogVideoX
-                from tools.video_gen_tools import _evict_pipeline, _video_device
-                import gc, torch
-                _evict_pipeline(f"ltx_i2v_{_video_device(1).split(':')[-1]}")
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
                 result = generate_video_clip(
                     prompt=prompt,
                     output_path=clip_path,
                     duration_s=duration_s,
                     niche=niche,
                 )
-                src = os.environ.get("VIDEO_GEN_MODEL", "wan21") if result else "cogvideox"
+                src = os.environ.get("VIDEO_GEN_MODEL", "wan21") if result else "unknown"
 
             if result:
                 log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label, mode=src)
@@ -216,31 +208,7 @@ def _source_asset(
             log.warning("visual_director.hf_flux_failed",
                         scene_id=scene_id, label=split_label, error=str(e)[:120])
 
-    # ── Tier 4: Pollinations FLUX still (fallback if HF_TOKEN not set / 402) ──
-    import time
-    _POLL_ATTEMPTS = 3
-    for _attempt in range(1, _POLL_ATTEMPTS + 1):
-        try:
-            w, h = (1080, 1920) if orientation in ("portrait", "reel", "short") else (1920, 1080)
-            encoded  = url_encode(prompt)
-            poll_url = (
-                f"https://image.pollinations.ai/prompt/{encoded}"
-                f"?width={w}&height={h}&nologo=true&model=flux&seed={scene_id}"
-            )
-            resp = requests.get(poll_url, stream=True, timeout=90)
-            resp.raise_for_status()
-            img_out = out_dir / f"{video_id}_scene_{scene_id:03d}_{split_label}.png"
-            with open(img_out, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            if img_out.stat().st_size > 10_000:
-                log.info("visual_director.pollinations_ok", scene_id=scene_id, label=split_label, attempt=_attempt)
-                return str(img_out), "image", "pollinations"
-        except Exception as e:
-            log.warning("visual_director.pollinations_failed_attempt",
-                        scene_id=scene_id, label=split_label, attempt=_attempt, error=str(e)[:120])
-            if _attempt < _POLL_ATTEMPTS:
-                time.sleep(3)
+
 
     # ── Tier 5: Placeholder (absolute last resort) ─────────────────────────────
     log.warning("visual_director.using_placeholder", scene_id=scene_id, label=split_label)
