@@ -237,8 +237,11 @@ def _source_scene(
     width, height = (1080, 1920) if orientation in ("reel", "short") else (1920, 1080)
 
     # Source A
-    anchor_path_A = str(out_dir / f"anchor_{scene_id:03d}_A.png")
-    anchor_A = generate_anchor_image(prompt=prompt_A, output_path=anchor_path_A, niche=niche)
+    anchor_A = None
+    if _I2V_ENABLED:
+        anchor_path_A = str(out_dir / f"anchor_{scene_id:03d}_A.png")
+        anchor_A = generate_anchor_image(prompt=prompt_A, output_path=anchor_path_A, niche=niche)
+    
     path_A, type_A, source_A = _source_asset(
         keyword=keyword_A, prompt=prompt_A, mood=mood, out_dir=out_dir,
         video_id=video_id, scene_id=scene_id, split_label="A",
@@ -246,8 +249,10 @@ def _source_scene(
     )
 
     # Source B
-    anchor_path_B = str(out_dir / f"anchor_{scene_id:03d}_B.png")
-    anchor_B = generate_anchor_image(prompt=prompt_B, output_path=anchor_path_B, niche=niche)
+    anchor_B = None
+    if _I2V_ENABLED:
+        anchor_path_B = str(out_dir / f"anchor_{scene_id:03d}_B.png")
+        anchor_B = generate_anchor_image(prompt=prompt_B, output_path=anchor_path_B, niche=niche)
     path_B, type_B, source_B = _source_asset(
         keyword=keyword_B, prompt=prompt_B, mood=mood, out_dir=out_dir,
         video_id=video_id, scene_id=scene_id, split_label="B",
