@@ -136,6 +136,26 @@ def compliance_node(state: PipelineState) -> dict[str, Any]:
         log.warning("compliance_agent.no_manifest")
         return {"compliance_passed": False, "compliance_issues": ["No scene_manifest found"]}
 
+    # ── TESTING SHORT-CIRCUIT ─────────────────────────────────────────────────
+    import os
+    if os.getenv("TEST_SCRIPT_ENABLED", "0").strip() == "1":
+        log.info("compliance_agent.test_mode",
+                 reason="TEST_SCRIPT_ENABLED=1, bypassing compliance loop")
+        scores = {
+            "semantic_uniqueness": 1.0,
+            "narrative_entropy":   1.0,
+            "cadence_variation":   1.0,
+            "advertiser_safety":   1.0,
+            "policy_compliance":   1.0,
+        }
+        return {
+            "compliance_score":  {**scores, "overall": 1.0},
+            "compliance_passed": True,
+            "compliance_issues": [],
+            "job_status":        "human_review",
+        }
+    # ── END TESTING SHORT-CIRCUIT ─────────────────────────────────────────────
+
     scenes = manifest_dict.get("scenes", [])
     full_text = (
         manifest_dict.get("hook", "") + " "

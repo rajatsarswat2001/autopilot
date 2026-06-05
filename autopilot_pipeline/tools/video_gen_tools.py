@@ -34,6 +34,15 @@ from typing import Any, Optional
 
 import structlog
 
+# ── PATCH FOR DIFFUSERS 0.33 WITH TRANSFORMERS 4.46.3 ───────────────────────
+try:
+    import transformers.utils
+    if not hasattr(transformers.utils, "FLAX_WEIGHTS_NAME"):
+        transformers.utils.FLAX_WEIGHTS_NAME = "flax_model.msgpack"
+except Exception:
+    pass
+# ─────────────────────────────────────────────────────────────────────────────
+
 log = structlog.get_logger(__name__)
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────

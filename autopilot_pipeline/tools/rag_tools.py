@@ -53,8 +53,9 @@ def _get_qdrant():
     global _qdrant
     if _qdrant is None:
         from qdrant_client import QdrantClient
+        kwargs = {"location": ":memory:"} if QDRANT_URL == ":memory:" else {"url": QDRANT_URL}
         _qdrant = QdrantClient(
-            url=QDRANT_URL,
+            **kwargs,
             api_key=QDRANT_API_KEY or None,
         )
     return _qdrant

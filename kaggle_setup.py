@@ -207,9 +207,9 @@ _run("kokoro>=0.9.4 + soundfile", _pip("kokoro>=0.9.4", "soundfile"), critical=F
 # Prevents falling back to generic SoundHelix MP3 tracks
 # ============================================================================
 print("  Installing ACE-Step music generator ...")
-# ACE-Step is not on PyPI — install from GitHub source
+# ACE-Step is not on PyPI — install from GitHub source zip to avoid git clone errors
 _run("acestep (GitHub)",
-     _pip("git+https://github.com/stepfun-ai/ACE-Step.git", flags=["--no-deps"]),
+     _pip("https://github.com/stepfun-ai/ACE-Step/archive/refs/heads/main.zip", flags=["--no-deps"]),
      critical=False)
 
 # ============================================================================
