@@ -161,9 +161,47 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def _split_into_groups(words: list[str], per_line: int) -> list[list[str]]:
-    """Split word list into groups of N for caption lines."""
-    return [words[i:i + per_line] for i in range(0, len(words), per_line)]
+def _split_into_groups(words: list[str], fallback_per_line: int = 4) -> list[list[str]]:
+    """Split word list into groups that fit within 800 pixels width (for 1080p).
+    Uses PIL for accurate text measurement, falls back to fixed count if unavailable."""
+    try:
+        from PIL import ImageFont
+        try:
+            # Arial bold at size 68 is roughly what we use
+            font = ImageFont.truetype("arialbd.ttf", 68)
+        except OSError:
+            try:
+                font = ImageFont.truetype("arial.ttf", 68)
+            except OSError:
+                font = ImageFont.load_default()
+
+        groups = []
+        current_group = []
+        # Max safe width for 1080x1920 portrait with margins is ~850px
+        max_width = 850
+
+        for word in words:
+            test_group = current_group + [word]
+            test_text = "  ".join(test_group)
+            
+            if hasattr(font, "getbbox"):
+                width = font.getbbox(test_text)[2]
+            else:
+                width = font.getsize(test_text)[0]
+                
+            if width <= max_width or not current_group:
+                current_group.append(word)
+            else:
+                groups.append(current_group)
+                current_group = [word]
+                
+        if current_group:
+            groups.append(current_group)
+        return groups
+
+    except ImportError:
+        # Fallback to fixed count if Pillow is not installed
+        return [words[i:i + fallback_per_line] for i in range(0, len(words), fallback_per_line)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,13 +277,17 @@ def _enrich_whisperx_timings(flat_timings: list[dict], scenes: list[dict]) -> li
                 return sid
         return scene_windows[-1][2] if scene_windows else 0
 
-    # Group words into caption chunks of _WORDS_PER_LINE
+    # Group words into caption chunks based on text width
     grouped: list[dict] = []
-    words = flat_timings
-    for i in range(0, len(words), _WORDS_PER_LINE):
-        group_words = words[i:i + _WORDS_PER_LINE]
-        group_texts = [w["word"] for w in group_words]
+    texts = [w["word"] for w in flat_timings]
+    text_groups = _split_into_groups(texts)
+    
+    idx = 0
+    for group_texts in text_groups:
+        group_len = len(group_texts)
+        group_words = flat_timings[idx:idx + group_len]
         group_start = group_words[0]["start"]
+        group_end = group_words[-1]["end"]
 
         for j, w in enumerate(group_words):
             grouped.append({
@@ -255,10 +297,11 @@ def _enrich_whisperx_timings(flat_timings: list[dict], scenes: list[dict]) -> li
                 "scene_id":         _get_scene_id(w["start"]),
                 "group":            group_texts,
                 "group_start":      group_start,
-                "group_end":        group_words[-1]["end"],
+                "group_end":        group_end,
                 "word_idx_in_group": j,
-                "is_last_in_group": j == len(group_words) - 1,
+                "is_last_in_group": j == group_len - 1,
             })
+        idx += group_len
 
     return grouped
 
@@ -370,8 +413,8 @@ YCbCr Matrix: None
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{fontname},{fontsize},{primary},&H000000FF,&H00000000,{back},{bold},0,0,0,100,100,0,0,3,4,0,2,40,40,{margin_v},1
-Style: Highlight,{fontname},{fontsize},{style["highlight"]},&H000000FF,&H00000000,{back},{bold},0,0,0,110,110,0,0,3,4,0,2,40,40,{margin_v},1
+Style: Default,{fontname},{fontsize},{primary},&H000000FF,&H00000000,{back},{bold},0,0,0,100,100,0,0,3,20,0,2,40,40,{margin_v},1
+Style: Highlight,{fontname},{fontsize},{style["highlight"]},&H000000FF,&H00000000,{back},{bold},0,0,0,110,110,0,0,3,20,0,2,40,40,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
