@@ -164,6 +164,56 @@ def _parse_manifest(raw: str, video_id: str, niche: str) -> tuple[SceneManifest 
 # LangGraph node
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRE-WRITTEN TEST SCRIPT — bypasses ALL LLM calls when TEST_SCRIPT_ENABLED=1
+# Set TEST_SCRIPT_ENABLED=1 in .env / Kaggle cell to use this during testing.
+# Saves Groq / Gemini quota and removes rate-limit risk entirely.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TEST_SCRIPT_JSON = """{
+  "video_id": "__PLACEHOLDER__",
+  "title": "The Savings Trick Banks Hide From You",
+  "niche": "personal_finance",
+  "target_cpm_tier": 2,
+  "hook": "Most people lose $400 a year to a mistake their bank is counting on.",
+  "scenes": [
+    {
+      "scene_id": 1,
+      "narration": "Your bank earns interest on YOUR money and shares almost none of it. The average savings account pays 0.4% while inflation runs at 3%. You're losing ground every month.",
+      "visual_prompt_A": "Close-up of hands counting worn dollar bills on a dark mahogany table, warm amber lamp light, shallow depth of field, cinematic",
+      "b_roll_keyword_A": "counting money savings",
+      "visual_prompt_B": "Wide shot of an empty glass jar labelled savings on a kitchen counter, morning light streaming through a window, cinematic",
+      "b_roll_keyword_B": "empty savings jar",
+      "emotional_tone": "tense",
+      "emotion_exaggeration": 0.7
+    },
+    {
+      "scene_id": 2,
+      "narration": "High-yield savings accounts from online banks pay 10 to 20 times more — same FDIC protection, no fees. I switched and earned $600 extra last year without doing anything else.",
+      "visual_prompt_A": "Person smiling at a laptop screen showing a bank dashboard with a rising graph, modern home office, natural daylight, cinematic",
+      "b_roll_keyword_A": "online banking laptop",
+      "visual_prompt_B": "Upward trending bar chart on a glowing monitor, dark background, teal accent lighting, cinematic",
+      "b_roll_keyword_B": "investment growth chart",
+      "emotional_tone": "inspiring",
+      "emotion_exaggeration": 0.6
+    },
+    {
+      "scene_id": 3,
+      "narration": "The switch takes 10 minutes. Open the account, link your old bank, move your emergency fund. Your money starts working harder tonight.",
+      "visual_prompt_A": "Hands typing on a smartphone showing a banking app transfer screen, coffee shop table, bokeh background, cinematic",
+      "b_roll_keyword_A": "mobile banking transfer",
+      "visual_prompt_B": "Time-lapse of coins stacking up on a white surface, clean bright studio light, cinematic",
+      "b_roll_keyword_B": "coins stacking growth",
+      "emotional_tone": "curious",
+      "emotion_exaggeration": 0.5
+    }
+  ],
+  "call_to_action": "Which bank are you using? Drop it in the comments — I'll tell you if you're leaving money on the table.",
+  "tags": ["personal finance", "savings account", "high yield savings", "money tips", "financial advice"]
+}"""
+
+
 def script_writer_node(state: PipelineState) -> dict[str, Any]:
     """
     Script Writer Agent node.
@@ -172,6 +222,9 @@ def script_writer_node(state: PipelineState) -> dict[str, Any]:
             script_revisions, script_draft (critic loop)
     Writes: script_draft, scene_manifest, uniqueness_score,
             script_revisions, errors
+
+    TESTING SHORTCUT: set TEST_SCRIPT_ENABLED=1 in env to skip all LLM calls
+    and use _TEST_SCRIPT_JSON (pre-written 3-scene, ~15s, personal finance).
     """
     topic     = state.get("selected_topic", "high-value financial topic")
     niche     = state.get("target_niche", "personal_finance")
@@ -182,6 +235,32 @@ def script_writer_node(state: PipelineState) -> dict[str, Any]:
     prev_score = state.get("uniqueness_score", 0.0)
 
     log.info("script_agent.start", topic=topic, revision=revisions)
+
+    # ── TESTING SHORT-CIRCUIT — zero LLM calls ───────────────────────────────
+    if os.getenv("TEST_SCRIPT_ENABLED", "0").strip() == "1":
+        log.info("script_agent.using_prewritten_script",
+                 reason="TEST_SCRIPT_ENABLED=1, skipping all LLM calls")
+        raw = _TEST_SCRIPT_JSON.replace("__PLACEHOLDER__", video_id)
+        manifest, parse_issues = _parse_manifest(raw, video_id, niche)
+        if manifest is None:
+            log.error("script_agent.prewritten_parse_failed", issues=parse_issues)
+            from datetime import datetime, timezone
+            return {"errors": [{"agent": "script_writer",
+                                "error": f"Pre-written script parse failed: {parse_issues}",
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "recoverable": False}],
+                    "script_revisions": 1}
+        score = _score_uniqueness(manifest)
+        log.info("script_agent.done", uniqueness=score, scenes=len(manifest.scenes),
+                 mode="pre_written")
+        return {
+            "script_draft":     raw,
+            "scene_manifest":   manifest.to_pipeline_dict(),
+            "uniqueness_score": score,
+            "script_revisions": 1,
+            "job_status":       "scripting",
+        }
+    # ── END TESTING SHORT-CIRCUIT ─────────────────────────────────────────────
 
     # ── Build prompt ─────────────────────────────────────────────────────────
     # Read scene count + duration cap from env (testing defaults: 3 scenes, 20s)
