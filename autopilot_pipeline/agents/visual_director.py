@@ -38,7 +38,7 @@ import structlog
 
 from contracts.visual_manifest import VisualManifest, VisualScene
 from contracts.timing_manifest import TimingManifest
-from tools.pexels_tools import search_and_download_video
+from tools.stock_tools import search_and_download_stock_clip
 from tools.video_gen_tools import (
     generate_video_clip,
     generate_video_pair,
@@ -162,7 +162,7 @@ def _source_asset(
                     duration_s=duration_s,
                     niche=niche,
                 )
-                src = "wan21" if result else "cogvideox"
+                src = os.environ.get("VIDEO_GEN_MODEL", "wan21") if result else "cogvideox"
 
             if result:
                 log.info("visual_director.ai_video_ok", scene_id=scene_id, label=split_label, mode=src)
@@ -174,17 +174,17 @@ def _source_asset(
     # ── Tier 2: Pexels stock footage ───────────────────────────────────────────
     if os.environ.get("DISABLE_STOCK", "0") != "1":
         try:
-            clip_path = search_and_download_video(
+            clip_path, provider = search_and_download_stock_clip(
                 keyword=keyword,
                 output_dir=str(out_dir),
                 filename=f"{video_id}_scene_{scene_id:03d}_{split_label}.mp4",
                 orientation=orientation,
             )
             if clip_path:
-                log.info("visual_director.pexels_ok", scene_id=scene_id, label=split_label)
-                return clip_path, "video_clip", "pexels"
+                log.info(f"visual_director.{provider}_ok", scene_id=scene_id, label=split_label)
+                return clip_path, "video_clip", provider
         except Exception as e:
-            log.warning("visual_director.pexels_failed",
+            log.warning("visual_director.stock_failed",
                         scene_id=scene_id, label=split_label, error=str(e)[:120])
     else:
         log.info("visual_director.stock_disabled", scene_id=scene_id, label=split_label)
@@ -386,8 +386,8 @@ def visual_node(state: PipelineState) -> dict[str, Any]:
 
     ai_count = sum(
         1 for s in visual_scenes
-        if getattr(s, 'source_A', '') in ('cogvideox', 'ltx', 'ltx_i2v', 'wan21')
-        or getattr(s, 'source_B', '') in ('cogvideox', 'ltx', 'ltx_i2v', 'wan21')
+        if getattr(s, 'source_A', '') in ('cogvideox', 'ltx', 'ltx_i2v', 'wan21', 'wan22_gguf')
+        or getattr(s, 'source_B', '') in ('cogvideox', 'ltx', 'ltx_i2v', 'wan21', 'wan22_gguf')
     )
     log.info(
         "visual_director.done",

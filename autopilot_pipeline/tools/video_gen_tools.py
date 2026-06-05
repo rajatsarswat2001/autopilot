@@ -21,14 +21,16 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 
@@ -237,10 +239,9 @@ def _load_wan(device: str = "cuda:0") -> Optional[object]:
                 torch_dtype=torch.float16,
             )
 
-            gpu_id = int(device.split(':')[-1]) if ':' in device else 0
-
-            # FIX 1: sequential offload — moves one submodule at a time.
-            pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
+            # FIX 1: Running natively on GPU for max speed on A100 (40GB VRAM)
+            # No CPU offloading needed.
+            pipe.to(device)
 
             # FIX 2: slice_size=1 is mandatory — the default "auto" is a no-op
             pipe.enable_attention_slicing(slice_size=1)
@@ -595,6 +596,52 @@ def generate_anchor_image(
     return None
 
 
+def _generate_wangp_clip(prompt: str, output_path: str, niche: str) -> Optional[str]:
+    """
+    Generates a video using the standalone WanGP application in headless mode.
+    Writes a JSON queue file and executes wgp.py via subprocess.
+    """
+    wangp_dir = os.environ.get("WANGP_DIR", "/kaggle/working/Wan2GP")
+    if not os.path.exists(wangp_dir):
+        log.error("wangp.missing_dir", dir=wangp_dir)
+        return None
+
+    job_file = os.path.join(wangp_dir, f"job_{int(time.time())}.json")
+    
+    # WanGP expected JSON structure (approximated for headless batch)
+    job_data = {
+        "prompt": prompt,
+        "model": "wan22_14b_gguf",
+        "output_path": os.path.abspath(output_path),
+        "resolution": "832x480",
+        "frames": 81
+    }
+    
+    try:
+        with open(job_file, "w") as f:
+            json.dump([job_data], f, indent=2)
+            
+        log.info("wangp.starting_job", job_file=job_file)
+        
+        result = subprocess.run(
+            ["python", "wgp.py", "--process", job_file],
+            cwd=wangp_dir,
+            capture_output=True,
+            text=True,
+            timeout=3600 # 1 hour timeout
+        )
+        
+        if result.returncode == 0 and os.path.exists(output_path):
+            log.info("wangp.success", output=output_path)
+            return output_path
+        else:
+            log.error("wangp.failed", stdout=result.stdout[-500:], stderr=result.stderr[-500:])
+            return None
+            
+    except Exception as e:
+        log.error("wangp.exception", error=str(e))
+        return None
+
 # ── PUBLIC API — same signatures as v1, visual_director.py unchanged ──────────
 
 def generate_video_clip(
@@ -622,6 +669,8 @@ def generate_video_clip(
         return _run_cogvideox(prompt, output_path, dev, niche)
     elif _FORCED_MODEL == "wan21":
         return _run_wan(prompt, output_path, dev, niche)
+    elif _FORCED_MODEL == "wan22_gguf":
+        return _generate_wangp_clip(prompt, output_path, niche)
     elif _FORCED_MODEL == "ltx":
         return _run_ltx_i2v(prompt, anchor_path="", output_path=output_path, device=dev, niche=niche)
 
@@ -655,26 +704,50 @@ def generate_i2v_clip(
     **kwargs,
 ) -> Optional[str]:
     """
-    I2V path: LTX I2V with corrected guidance values.
-    Falls back to T2V if anchor missing or I2V fails.
+    I2V path: Headless Kaggle ComfyUI API (Wan 2.1 14B Q6_K).
     """
-    if not is_video_gen_available():
+    if not _ENABLED:
         return None
 
-    dev = _video_device(1)
-
-    if _FORCED_MODEL in ["cogvideox", "wan21"]:
-        # I2V not supported by these, fallback to T2V
+    api_url = os.getenv("KAGGLE_NGROK_URL", "").strip()
+    if not api_url:
+        log.warning("video_gen.missing_kaggle_url")
+        # Fall back to legacy if no URL is provided
         return generate_video_clip(prompt, output_path, duration_s, niche)
 
-    if anchor_image_path and Path(anchor_image_path).exists():
-        result = _run_ltx_i2v(prompt, anchor_image_path, output_path, dev, niche)
-        if result or _FORCED_MODEL == "ltx":
-            return result
-        _evict_pipeline(f"ltx_i2v_{dev.split(':')[-1]}")
+    if not anchor_image_path or not Path(anchor_image_path).exists():
+        log.warning("video_gen.missing_anchor_image")
+        return generate_video_clip(prompt, output_path, duration_s, niche)
 
-    log.warning("video_gen.i2v_fallback_to_t2v")
-    return generate_video_clip(prompt, output_path, duration_s, niche)
+    log.info("video_gen.kaggle_api_starting", prompt=prompt)
+    
+    try:
+        import requests
+        with open(anchor_image_path, "rb") as f:
+            files = {"image": (Path(anchor_image_path).name, f, "image/png")}
+            data = {"prompt": _enrich(prompt, niche)}
+            
+            # This is a long-running request (10-15 mins), so timeout must be high
+            response = requests.post(
+                f"{api_url.rstrip('/')}/generate_video",
+                files=files,
+                data=data,
+                timeout=1800  # 30 minutes
+            )
+            
+        if response.status_code == 200:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "wb") as out_f:
+                out_f.write(response.content)
+            log.info("video_gen.kaggle_api_success", path=output_path)
+            return output_path
+        else:
+            log.error("video_gen.kaggle_api_failed", status=response.status_code, text=response.text)
+            return generate_video_clip(prompt, output_path, duration_s, niche)
+            
+    except Exception as e:
+        log.error("video_gen.kaggle_api_error", error=str(e))
+        return generate_video_clip(prompt, output_path, duration_s, niche)
 
 
 def generate_video_pair(
