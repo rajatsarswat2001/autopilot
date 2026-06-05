@@ -715,25 +715,31 @@ def generate_i2v_clip(
         # Fall back to legacy if no URL is provided
         return generate_video_clip(prompt, output_path, duration_s, niche)
 
-    if not anchor_image_path or not Path(anchor_image_path).exists():
-        log.warning("video_gen.missing_anchor_image")
-        return generate_video_clip(prompt, output_path, duration_s, niche)
+    has_anchor = anchor_image_path and Path(anchor_image_path).exists()
+    if not has_anchor:
+        log.warning("video_gen.missing_anchor_image_falling_back_to_t2v")
 
     log.info("video_gen.kaggle_api_starting", prompt=prompt)
     
     try:
         import requests
-        with open(anchor_image_path, "rb") as f:
-            files = {"image": (Path(anchor_image_path).name, f, "image/png")}
-            data = {"prompt": _enrich(prompt, niche)}
+        
+        files = {}
+        if has_anchor:
+            with open(anchor_image_path, "rb") as f:
+                # We must read it entirely into memory since we're passing dict of bytes or file objects
+                img_data = f.read()
+            files = {"image": (Path(anchor_image_path).name, img_data, "image/png")}
             
-            # This is a long-running request (10-15 mins), so timeout must be high
-            response = requests.post(
-                f"{api_url.rstrip('/')}/generate_video",
-                files=files,
-                data=data,
-                timeout=1800  # 30 minutes
-            )
+        data = {"prompt": _enrich(prompt, niche)}
+        
+        # This is a long-running request (10-15 mins), so timeout must be high
+        response = requests.post(
+            f"{api_url.rstrip('/')}/generate_video",
+            files=files if files else None,
+            data=data,
+            timeout=1800  # 30 minutes
+        )
             
         if response.status_code == 200:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
