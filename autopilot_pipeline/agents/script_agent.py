@@ -181,30 +181,30 @@ _TEST_SCRIPT_JSON = """{
     {
       "scene_id": 1,
       "narration": "Your bank earns interest on YOUR money and shares almost none of it. The average savings account pays 0.4% while inflation runs at 3%. You're losing ground every month.",
-      "visual_prompt_A": "Close-up of hands counting worn dollar bills on a dark mahogany table, warm amber lamp light, shallow depth of field, cinematic",
-      "b_roll_keyword_A": "counting money savings",
-      "visual_prompt_B": "Wide shot of an empty glass jar labelled savings on a kitchen counter, morning light streaming through a window, cinematic",
-      "b_roll_keyword_B": "empty savings jar",
+      "visual_prompt_A": "Extreme close-up of weathered male hands methodically counting a thick stack of worn $100 bills one by one on a dark polished mahogany desk, each bill slightly dog-eared and creased from heavy use, a single antique brass banker's lamp casts a warm amber cone of light from the upper right creating deep directional shadows across every ridge and fold of the bills, the scene fades into rich chocolate darkness behind with very shallow depth of field at f/1.8, subtle motion blur on each bill flip implying urgency and repetition, visible film grain, desaturated teal-and-orange color grade, cinematic",
+      "b_roll_keyword_A": "counting cash money desk",
+      "visual_prompt_B": "Medium wide shot of a single clear glass mason jar sitting alone on a weathered white-painted wooden kitchen windowsill, the jar is nearly empty with only a handful of scattered pennies and dimes at the bottom visible through the glass, soft diffused gray morning light pours through sheer linen curtains behind the jar creating a gentle rim highlight along the jar's curve, outside the window a blurred suburban street shows a few parked cars in cool bokeh, the counter surface shows subtle wood grain texture, muted cool blue-gray color palette with warm amber highlights on the jar rim, slow gentle push-in camera movement over 5 seconds, photorealistic, cinematic",
+      "b_roll_keyword_B": "empty savings jar window light",
       "emotional_tone": "tense",
       "emotion_exaggeration": 0.7
     },
     {
       "scene_id": 2,
       "narration": "High-yield savings accounts from online banks pay 10 to 20 times more — same FDIC protection, no fees. I switched and earned $600 extra last year without doing anything else.",
-      "visual_prompt_A": "Person smiling at a laptop screen showing a bank dashboard with a rising graph, modern home office, natural daylight, cinematic",
-      "b_roll_keyword_A": "online banking laptop",
-      "visual_prompt_B": "Upward trending bar chart on a glowing monitor, dark background, teal accent lighting, cinematic",
-      "b_roll_keyword_B": "investment growth chart",
+      "visual_prompt_A": "Medium shot of a confident mid-30s woman with natural makeup and relaxed professional attire leaning forward at a minimalist white oak standing desk in a bright contemporary home office, she traces a sharply rising green line graph on a large ultrawide monitor with her index finger while grinning, the graph UI shows a steep upward curve labeled 4.85 percent APY in bold green text against a dark dashboard background, large floor-to-ceiling windows behind her flood the room with soft diffused blue-white morning daylight creating a clean soft box key light on her face and hair, healthy indoor plants and a steaming ceramic mug are visible in shallow background bokeh, lens at 50mm equivalent with shallow focus on her face, warm skin tones contrasting against cool ambient environment, subtle slow dolly-in camera movement, cinematic",
+      "b_roll_keyword_A": "woman laptop banking smile office",
+      "visual_prompt_B": "Tight macro shot looking straight at a large 4K monitor displaying a dark-mode fintech banking dashboard, the interface shows an account balance counter ticking upward in real time with bright green percentage numbers climbing, bold white sans-serif text reads HIGH-YIELD SAVINGS 4.85% APY, glowing teal and emerald accent UI elements illuminate the dark screen surface, the glossy monitor bezel reflects a softly blurred office environment in cool blues, camera slowly racks focus from the sharp screen text to the reflection revealing bokeh office shapes, deep cool cinematic color grade with electric teal highlights and deep shadow blacks, photorealistic screen render, cinematic",
+      "b_roll_keyword_B": "bank dashboard screen teal glow",
       "emotional_tone": "inspiring",
       "emotion_exaggeration": 0.6
     },
     {
       "scene_id": 3,
       "narration": "The switch takes 10 minutes. Open the account, link your old bank, move your emergency fund. Your money starts working harder tonight.",
-      "visual_prompt_A": "Hands typing on a smartphone showing a banking app transfer screen, coffee shop table, bokeh background, cinematic",
-      "b_roll_keyword_A": "mobile banking transfer",
-      "visual_prompt_B": "Time-lapse of coins stacking up on a white surface, clean bright studio light, cinematic",
-      "b_roll_keyword_B": "coins stacking growth",
+      "visual_prompt_A": "Close-up overhead bird's-eye shot angled at 80 degrees downward looking at a pair of hands holding a sleek matte-black iPhone 15, the screen displays a clean modern fintech app transfer interface mid-completion with a circular progress animation and bold green text reading Transfer Complete with a checkmark, the phone rests just above a dark aged walnut coffee table surface showing visible wood grain and a small white ceramic espresso cup and a tiny succulent plant softly out of focus at the edges of frame, natural window light streams in from camera left casting a gentle directional shadow of the hands across the warm wood surface, 35mm equivalent lens perspective with tight vignette, warm coffeehouse color temperature, slow orbital clockwise camera rotation at low angle, cinematic 4K",
+      "b_roll_keyword_A": "phone banking app transfer wood table",
+      "visual_prompt_B": "Ultra slow motion macro close-up at 240fps of gold and silver coins being dropped one by one onto a growing neat cylindrical stack on a pure white seamless surface, each coin tumbles through the air in perfect detail catching a single overhead hard studio strobe that creates a crisp specular highlight along the coin edge and a sharp dramatic shadow beneath the stack, the falling coin spins in slow motion mid-air revealing engraved texture detail, the stack visibly grows taller with each addition, background is pure white with a subtle soft gray radial vignette at corners, razor-sharp focus on the topmost coin with lower stack descending into gentle bokeh at f/2.0, cold clinical white light with warm gold coin reflections, macro lens distortion, cinematic high-speed photography aesthetic",
+      "b_roll_keyword_B": "coins falling stack macro slow motion",
       "emotional_tone": "curious",
       "emotion_exaggeration": 0.5
     }
