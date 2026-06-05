@@ -216,9 +216,26 @@ def trend_scout_node(state: PipelineState) -> dict[str, Any]:
 
     Reads:  selected_topic (pre-seed), target_niche
     Writes: selected_topic, raw_trends, target_cpm_tier, job_status, errors
+
+    TESTING SHORTCUT: set TEST_SCRIPT_ENABLED=1 to skip all API calls and
+    return the hardcoded test topic immediately (matches _TEST_SCRIPT_JSON).
     """
-    niche       = state.get("target_niche", "personal_finance")
-    pre_seeded  = state.get("selected_topic")
+    niche      = state.get("target_niche", "personal_finance")
+    pre_seeded = state.get("selected_topic")
+
+    # ── TESTING SHORT-CIRCUIT — zero API calls ────────────────────────────────
+    if os.getenv("TEST_SCRIPT_ENABLED", "0").strip() == "1":
+        test_topic = "The Savings Trick Banks Hide From You"
+        log.info("trend_scout.test_mode",
+                 topic=test_topic,
+                 reason="TEST_SCRIPT_ENABLED=1, skipping Tavily + YouTube API calls")
+        return {
+            "selected_topic":  test_topic,
+            "raw_trends":      [],
+            "target_cpm_tier": 1,  # personal_finance = tier 1
+            "job_status":      "researching",
+        }
+    # ── END TESTING SHORT-CIRCUIT ─────────────────────────────────────────────
 
     if pre_seeded:
         tier = _classify_cpm_tier(pre_seeded)
@@ -227,6 +244,7 @@ def trend_scout_node(state: PipelineState) -> dict[str, Any]:
 
     cfg = NICHE_CONFIG.get(niche, NICHE_CONFIG["personal_finance"])
     log.info("trend_scout.start", niche=niche, default_tier=cfg["tier"])
+
 
     candidates: list[dict] = []
     for query in cfg["seed_queries"]:

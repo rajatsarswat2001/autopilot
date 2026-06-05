@@ -11,6 +11,9 @@ Pipeline:
 
 Research is best-effort: failures do not halt the pipeline.
 The Script Agent will fall back to general LLM knowledge if notes are empty.
+
+TESTING SHORTCUT: set TEST_SCRIPT_ENABLED=1 to skip all Tavily calls and
+return hardcoded research notes matching the pre-written test script.
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -110,6 +113,41 @@ def _store_to_qdrant(video_id: str, topic: str, notes: str, source_urls: list[st
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pre-written test research notes (used when TEST_SCRIPT_ENABLED=1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TEST_RESEARCH_NOTES = """RESEARCH NOTES: The Savings Trick Banks Hide From You
+Sources: Pre-written test data | TEST MODE (zero Tavily API calls)
+============================================================
+
+[1] Average savings account APY vs High-Yield savings 2025
+    The national average savings account APY is 0.41% (FDIC, 2025).
+    High-yield savings accounts from online banks offer 4.5-5.1% APY.
+    That is 10-12x higher with identical FDIC insurance protection up to $250,000.
+
+[2] Inflation erosion of savings
+    US CPI inflation averaged 3.2% in 2024. A 0.4% APY savings account loses
+    ~2.8% real purchasing power per year. On a $15,000 emergency fund that is
+    ~$420 lost annually vs a high-yield savings account earning 4.85%.
+
+[3] Switching time and friction
+    Opening a high-yield savings account takes 5-10 minutes online.
+    Funds transfer via ACH in 1-3 business days. No fees at most online banks.
+    Popular options: Marcus by Goldman Sachs, Ally Bank, SoFi, American Express HYSA.
+
+[4] Why big banks pay low rates
+    Traditional banks have expensive branch networks and rely on customer inertia.
+    Online banks have lower overhead and pass savings to customers as higher APY.
+    FDIC insurance coverage is identical regardless of bank size or type.
+"""
+
+_TEST_SOURCE_URLS = [
+    "https://www.fdic.gov/bank/statistical/guide/2025/",
+    "https://www.bankrate.com/banking/savings/best-high-yield-interests-savings-accounts/",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LangGraph node
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -119,6 +157,10 @@ def research_node(state: PipelineState) -> dict[str, Any]:
 
     Reads:  selected_topic, video_id
     Writes: research_notes, source_urls, job_status
+
+    TESTING SHORTCUT: set TEST_SCRIPT_ENABLED=1 to skip all Tavily calls and
+    return hardcoded research notes matching the pre-written test script.
+    Zero API quota usage.
     """
     topic    = state.get("selected_topic", "")
     video_id = state.get("video_id", "")
@@ -126,6 +168,17 @@ def research_node(state: PipelineState) -> dict[str, Any]:
     if not topic:
         log.warning("research_agent.no_topic")
         return {"research_notes": "", "source_urls": [], "job_status": "scripting"}
+
+    # ── TESTING SHORT-CIRCUIT — zero API calls ────────────────────────────────
+    if os.getenv("TEST_SCRIPT_ENABLED", "0").strip() == "1":
+        log.info("research_agent.test_mode",
+                 reason="TEST_SCRIPT_ENABLED=1, returning hardcoded notes, skipping Tavily")
+        return {
+            "research_notes": _TEST_RESEARCH_NOTES,
+            "source_urls":    _TEST_SOURCE_URLS,
+            "job_status":     "scripting",
+        }
+    # ── END TESTING SHORT-CIRCUIT ─────────────────────────────────────────────
 
     log.info("research_agent.start", topic=topic[:80])
 

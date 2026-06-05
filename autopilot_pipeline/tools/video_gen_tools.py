@@ -457,8 +457,46 @@ def generate_video_clip(
         return _run_wan(prompt, output_path, dev, niche, duration_s=duration_s)
     elif _FORCED_MODEL == "wan22_gguf":
         return _generate_wangp_clip(prompt, output_path, niche)
+    elif _FORCED_MODEL == "wan22":
+        # Route to ComfyUI dual-GPU workers launched in Cell 5 (Kaggle notebook).
+        # Falls back to wan21 diffusers if KAGGLE_NGROK_URL is not set.
+        api_url = os.getenv("KAGGLE_NGROK_URL", "").strip()
+        if api_url:
+            try:
+                import requests as _req
+                fps    = _WAN_FPS
+                frames = int(min(duration_s or _MAX_DURATION_S, _MAX_DURATION_S) * fps)
+                frames = frames if frames % 2 == 1 else max(1, frames - 1)
+                enriched = _enrich(prompt, niche)
+                log.info("wan22.comfyui_request", url=api_url,
+                         frames=frames, duration_s=round(frames / fps, 1))
+                resp = _req.post(
+                    f"{api_url.rstrip('/')}/generate_video",
+                    data={
+                        "prompt": enriched,
+                        "seed":   str(abs(hash(prompt)) % (2 ** 31)),
+                        "steps":  str(_WAN_STEPS),
+                        "width":  str(_WAN_WIDTH),
+                        "height": str(_WAN_HEIGHT),
+                        "frames": str(frames),
+                    },
+                    timeout=1800,
+                )
+                if resp.status_code == 200:
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                    with open(output_path, "wb") as _f:
+                        _f.write(resp.content)
+                    log.info("wan22.comfyui_success", path=output_path)
+                    return output_path
+                else:
+                    log.error("wan22.comfyui_failed", status=resp.status_code)
+            except Exception as _e:
+                log.error("wan22.comfyui_error", error=str(_e)[:200])
+        log.warning("wan22.fallback_to_wan21",
+                    reason="KAGGLE_NGROK_URL not set or ComfyUI unreachable")
+        return _run_wan(prompt, output_path, dev, niche, duration_s=duration_s)
 
-    # Tier 1: Wan2.1
+    # Default: Wan2.1 diffusers
     result = _run_wan(prompt, output_path, dev, niche, duration_s=duration_s)
     if result:
         return result
