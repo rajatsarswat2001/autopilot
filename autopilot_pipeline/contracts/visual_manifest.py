@@ -26,8 +26,8 @@ class VisualScene(BaseModel):
     asset_path_B: str = Field(..., description="Absolute path to second video clip or image file")
     asset_type_A: Literal["video_clip", "image", "placeholder"]
     asset_type_B: Literal["video_clip", "image", "placeholder"]
-    source_A: Literal["cogvideox", "ltx", "ltx_i2v", "wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "svd_flux", "placeholder"]
-    source_B: Literal["cogvideox", "ltx", "ltx_i2v", "wan21", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "svd_flux", "placeholder"]
+    source_A: Literal["cogvideox", "ltx", "ltx_i2v", "wan21", "wan22", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "svd_flux", "placeholder"]
+    source_B: Literal["cogvideox", "ltx", "ltx_i2v", "wan21", "wan22", "pexels", "pixabay", "pollinations", "sdxl_nim", "sdxl_local", "replicate", "svd_flux", "placeholder"]
     width: int = 1920
     height: int = 1080
     duration_s: Optional[float] = None  # None for images; duration from timing manifest
@@ -58,7 +58,7 @@ class VisualManifest(BaseModel):
     @property
     def generated_scene_count(self) -> int:
         # "cogvideox" is the primary AI source label returned by video_gen_tools.py
-        _generated = {"cogvideox", "ltx", "ltx_i2v", "wan21", "pollinations", "sdxl_nim", "sdxl_local", "replicate"}
+        _generated = {"cogvideox", "ltx", "ltx_i2v", "wan21", "wan22", "pollinations", "sdxl_nim", "sdxl_local", "replicate"}
         return sum(1 for s in self.scenes if s.source_A in _generated or s.source_B in _generated)
 
     @property

@@ -527,15 +527,15 @@ def generate_i2v_clip(
     if not _ENABLED:
         return None
 
+    if not anchor_image_path or not Path(anchor_image_path).exists():
+        anchor_image_path = None
+        log.warning("video_gen.missing_anchor_image_falling_back_to_t2v")
+
     api_url = os.getenv("KAGGLE_NGROK_URL", "").strip()
     if not api_url:
         log.warning("video_gen.missing_kaggle_url")
         # Fall back to legacy if no URL is provided
         return generate_video_clip(prompt, output_path, duration_s, niche)
-
-    has_anchor = anchor_image_path and Path(anchor_image_path).exists()
-    if not has_anchor:
-        log.warning("video_gen.missing_anchor_image_falling_back_to_t2v")
 
     log.info("video_gen.kaggle_api_starting", prompt=prompt)
     
@@ -543,7 +543,7 @@ def generate_i2v_clip(
         import requests
         
         files = {}
-        if has_anchor:
+        if anchor_image_path:
             with open(anchor_image_path, "rb") as f:
                 # We must read it entirely into memory since we're passing dict of bytes or file objects
                 img_data = f.read()
