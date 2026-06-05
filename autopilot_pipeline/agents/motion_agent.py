@@ -274,6 +274,18 @@ def motion_node(state: PipelineState) -> dict[str, Any]:
     avg_before = round(sum(before_scores) / len(before_scores), 3)
     log.info("motion_agent.before", avg_score=avg_before, scenes=len(scenes))
 
+    # ── TESTING SHORT-CIRCUIT ─────────────────────────────────────────────────
+    import os
+    if os.getenv("TEST_SCRIPT_ENABLED", "0").strip() == "1":
+        log.info("motion_agent.test_mode",
+                 reason="TEST_SCRIPT_ENABLED=1, bypassing Motion LLM")
+        return {
+            "scene_manifest": manifest_dict,
+            "motion_scores":  before_scores,
+            "job_status":     "audio",
+        }
+    # ── END TESTING SHORT-CIRCUIT ─────────────────────────────────────────────
+
     slim_scenes = [
         {
             "scene_id":        s["scene_id"],

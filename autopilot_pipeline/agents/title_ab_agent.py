@@ -190,6 +190,18 @@ def title_ab_node(state: PipelineState) -> dict[str, Any]:
         log.warning("title_ab_agent.no_manifest_skipping")
         return {}
 
+    # ── TESTING SHORT-CIRCUIT ─────────────────────────────────────────────────
+    import os
+    if os.getenv("TEST_SCRIPT_ENABLED", "0").strip() == "1":
+        log.info("title_ab_agent.test_mode",
+                 reason="TEST_SCRIPT_ENABLED=1, bypassing Title AB LLM")
+        return {
+            "scene_manifest": manifest_dict,
+            "title_variants":  [],
+            "job_status":      "human_review",
+        }
+    # ── END TESTING SHORT-CIRCUIT ─────────────────────────────────────────────
+
     try:
         variants = _generate_variants(topic, niche, manifest_dict)
     except Exception as e:

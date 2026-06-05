@@ -178,6 +178,18 @@ def entropy_node(state: PipelineState) -> dict[str, Any]:
         log.warning("entropy_agent.no_manifest")
         return {"entropy_score": 0.0, "entropy_applied": False}
 
+    # ── TESTING SHORT-CIRCUIT ─────────────────────────────────────────────────
+    if os.getenv("TEST_SCRIPT_ENABLED", "0").strip() == "1":
+        log.info("entropy_agent.test_mode",
+                 reason="TEST_SCRIPT_ENABLED=1, bypassing entropy LLM")
+        return {
+            "scene_manifest":  manifest_dict,
+            "entropy_score":   1.0,
+            "entropy_applied": False,
+            "job_status":      "compliance",
+        }
+    # ── END TESTING SHORT-CIRCUIT ─────────────────────────────────────────────
+
     before_score = _entropy_score(manifest_dict)
     log.info("entropy_agent.before", score=before_score)
 
