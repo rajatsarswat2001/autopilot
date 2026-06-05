@@ -46,10 +46,16 @@ _FORCED_MODEL = os.getenv("VIDEO_GEN_MODEL", "").strip().lower()
 _WAN_MODEL    = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 _WAN_WIDTH    = 832
 _WAN_HEIGHT   = 480
-_WAN_FRAMES   = 81      # 81 frames at 24fps = 3.375s, Wan's native sweet spot
 _WAN_FPS      = 24
 _WAN_STEPS    = int(os.getenv("VIDEO_GEN_WAN_STEPS", "20"))
 _WAN_GUIDANCE = float(os.getenv("VIDEO_GEN_WAN_GUIDANCE", "5.0"))
+
+# ── TESTING MODE: hard cap on clip duration ──────────────────────────────────
+# Set MAX_VIDEO_DURATION_S=20 in .env to cap all clips to ≤20 seconds.
+# Wan2.1 at 24fps: frames must be odd (81=3.4s, 121=5s, 241=10s, 481=20s)
+_MAX_DURATION_S = float(os.getenv("MAX_VIDEO_DURATION_S", "20.0"))  # cap: 15-20s
+_MAX_FRAMES     = int(_MAX_DURATION_S * _WAN_FPS)  # e.g. 20s*24fps = 480 frames
+_WAN_FRAMES     = 81   # default clip length (3.4s) — overridden per-call by duration_s
 
 
 
@@ -261,6 +267,7 @@ def _run_wan(
     device: str,
     niche: str = "default",
     seed: int = 42,
+    duration_s: float = 0.0,  # 0 = use default _WAN_FRAMES
 ) -> Optional[str]:
     try:
         import torch
@@ -269,8 +276,21 @@ def _run_wan(
             return None
 
         enriched = _enrich(prompt, niche)
+
+        # ── Compute frames from requested duration, capped at MAX_VIDEO_DURATION_S ──
+        if duration_s > 0:
+            raw_frames = int(duration_s * _WAN_FPS)
+        else:
+            raw_frames = _WAN_FRAMES
+        # Wan2.1 requires odd frame count; cap at _MAX_FRAMES
+        capped = min(raw_frames, _MAX_FRAMES)
+        frames = capped if capped % 2 == 1 else max(1, capped - 1)
+        actual_duration_s = frames / _WAN_FPS
+
         log.info("wan.generating", device=device, steps=_WAN_STEPS,
-                 size=f"{_WAN_WIDTH}x{_WAN_HEIGHT}", frames=_WAN_FRAMES,
+                 size=f"{_WAN_WIDTH}x{_WAN_HEIGHT}", frames=frames,
+                 duration_s=round(actual_duration_s, 1),
+                 max_cap_s=_MAX_DURATION_S,
                  prompt=enriched[:80])
 
         generator = torch.Generator(device).manual_seed(seed)
@@ -281,7 +301,7 @@ def _run_wan(
                 negative_prompt=_NEGATIVE,
                 width=_WAN_WIDTH,
                 height=_WAN_HEIGHT,
-                num_frames=_WAN_FRAMES,
+                num_frames=frames,
                 guidance_scale=_WAN_GUIDANCE,
                 num_inference_steps=_WAN_STEPS,
                 generator=generator,
@@ -434,12 +454,12 @@ def generate_video_clip(
     dev = device or _video_device(1)
 
     if _FORCED_MODEL == "wan21":
-        return _run_wan(prompt, output_path, dev, niche)
+        return _run_wan(prompt, output_path, dev, niche, duration_s=duration_s)
     elif _FORCED_MODEL == "wan22_gguf":
         return _generate_wangp_clip(prompt, output_path, niche)
 
     # Tier 1: Wan2.1
-    result = _run_wan(prompt, output_path, dev, niche)
+    result = _run_wan(prompt, output_path, dev, niche, duration_s=duration_s)
     if result:
         return result
 

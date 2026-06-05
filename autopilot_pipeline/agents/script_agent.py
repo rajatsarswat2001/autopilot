@@ -184,12 +184,22 @@ def script_writer_node(state: PipelineState) -> dict[str, Any]:
     log.info("script_agent.start", topic=topic, revision=revisions)
 
     # ── Build prompt ─────────────────────────────────────────────────────────
+    # Read scene count + duration cap from env (testing defaults: 3 scenes, 20s)
+    scene_count  = int(os.getenv("SCRIPT_SCENE_COUNT", "3"))
+    max_dur_s    = float(os.getenv("MAX_VIDEO_DURATION_S", "20.0"))
+    # Each scene narration should be short enough to fit within the budget.
+    # At ~130 WPM: max_dur_s * 130 / 60 words total across all scenes.
+    words_budget = int(max_dur_s * 130 / 60)
+    words_per_scene = max(10, words_budget // max(1, scene_count))
+
     if revisions == 0 or not prev_draft:
         user_msg = (
             f"Topic: {topic}\nNiche: {niche}\n"
             f"Research:\n{research or 'Use general knowledge.'}\n\n"
             f"Schema:\n{_SCHEMA}\n\n"
-            "Generate exactly a 3 scene script. Make the hook arresting and specific. "
+            f"Generate exactly a {scene_count} scene script. Make the hook arresting and specific. "
+            f"CRITICAL: Total video must be ≤{max_dur_s:.0f} seconds. "
+            f"Each scene narration MUST be ≤{words_per_scene} words (short, punchy sentences). "
             "Ensure 'title' is present as a top-level JSON field and is under 70 characters."
         )
         messages = [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user_msg}]

@@ -154,6 +154,13 @@ class SceneManifest(BaseModel):
         """Rough estimate: 130 WPM average narration speed."""
         return self.total_narration_words / 130 * 60
 
+    @property
+    def is_within_duration_cap(self) -> bool:
+        """True if estimated duration is within MAX_VIDEO_DURATION_S (testing cap)."""
+        import os
+        cap = float(os.getenv("MAX_VIDEO_DURATION_S", "20.0"))
+        return self.estimated_duration_s <= cap
+
     def to_pipeline_dict(self) -> dict:
         """Return plain dict for PipelineState.scene_manifest."""
         return self.model_dump(mode="json")
